@@ -1,0 +1,22 @@
+{
+  "name": "nya",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run build --workspace @nya/core",
+    "test": "npm run test --workspace @nya/core",
+    "typecheck": "npm run typecheck --workspace @nya/core && npm run typecheck --workspace @nya/playground",
+    "dev:core": "npm run build --workspace @nya/core -- --watch",
+    "dev:playground": "npm run dev --workspace @nya/playground",
+    "playground": "npm run build --workspace @nya/core && npm run start --workspace @nya/playground"
+  },
+  "workspaces": [
+    "packages/*",
+    "playground"
+  ],
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.5"
+  }
+}

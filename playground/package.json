@@ -1,0 +1,14 @@
+{
+  "name": "@nya/playground",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --experimental-strip-types src/main.ts",
+    "start": "node --experimental-strip-types src/main.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@nya/core": "*"
+  }
+}
