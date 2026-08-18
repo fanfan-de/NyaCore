@@ -10,6 +10,20 @@ export type {
   CleanupSource,
   Disposer,
 } from './disposable.js'
+export { EventRegistry, isBailed } from './events.js'
+export type {
+  DispatchMode,
+  EventCallback,
+  EventHook,
+  EventListener,
+  EventName,
+  EventOptions,
+  EventParameters,
+  EventReturn,
+  Events,
+  EventThis,
+  EventThisArgument,
+} from './events.js'
 export { Fiber, FiberState } from './fiber.js'
 export type {
   Component,
@@ -23,6 +37,7 @@ export type {
   ServiceImplementation,
 } from './service.js'
 export {
+  contextFilter,
   contextMarker,
   serviceCheck,
   serviceInit,

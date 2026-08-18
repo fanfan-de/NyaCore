@@ -1,16 +1,27 @@
 /** 本文件定义组件运行上下文，负责派生作用域，并把组件安装与 Effect 登记委托给 Registry 和 Fiber。 */
 
 import type { CleanupSource, Disposer } from './disposable.js'
+import { EventRegistry } from './events.js'
+import type {
+  EventListener,
+  EventName,
+  EventOptions,
+  EventParameters,
+  EventReturn,
+  Events,
+  EventThisArgument,
+} from './events.js'
 import { Fiber } from './fiber.js'
 import type { Component } from './component.js'
 import type { Inject } from './inject.js'
 import { Registry } from './registry.js'
 import { ServiceRegistry } from './service.js'
-import { contextMarker } from './symbols.js'
+import { contextFilter, contextMarker } from './symbols.js'
 
 const protectedProperties = new Set<PropertyKey>([
   contextMarker,
   'fiber',
+  'events',
   'registry',
   'root',
   'services',
@@ -79,9 +90,12 @@ const contextProxyHandler: ProxyHandler<Context> = {
 }
 
 export class Context {
+  static readonly filter: typeof contextFilter = contextFilter
+
   readonly [contextMarker] = true
   readonly root: this
   readonly fiber: Fiber
+  readonly events: EventRegistry
   readonly registry: Registry
   readonly services: ServiceRegistry
 
@@ -97,6 +111,7 @@ export class Context {
     this.services = new ServiceRegistry(proxy)
     this.registry = new Registry(proxy)
     this.fiber = Fiber.root(proxy)
+    this.events = new EventRegistry(proxy)
 
     return proxy
   }
@@ -169,6 +184,99 @@ export class Context {
    */
   effect(setup: () => CleanupSource, label?: string): Disposer {
     return this.fiber.effect(setup, label)
+  }
+
+  /** 注册跟随当前 Fiber 生命周期自动清理的事件监听器。 */
+  on<Name extends EventName>(
+    name: Name,
+    listener: EventListener<Name>,
+    options?: boolean | EventOptions,
+  ): Disposer {
+    return this.root.events.on(
+      this,
+      name,
+      listener as (...args: any[]) => any,
+      options,
+    )
+  }
+
+  /** 注册首次调用前自动移除的事件监听器。 */
+  once<Name extends EventName>(
+    name: Name,
+    listener: EventListener<Name>,
+    options?: boolean | EventOptions,
+  ): Disposer {
+    return this.root.events.once(
+      this,
+      name,
+      listener as (...args: any[]) => any,
+      options,
+    )
+  }
+
+  emit<Name extends EventName>(
+    name: Name,
+    ...args: EventParameters<Events[Name]>
+  ): void
+  emit<Name extends EventName>(
+    thisArg: NoInfer<EventThisArgument<Events[Name]>>,
+    name: Name,
+    ...args: EventParameters<Events[Name]>
+  ): void
+  emit(...args: unknown[]): void {
+    return this.root.events.emit(...args)
+  }
+
+  parallel<Name extends EventName>(
+    name: Name,
+    ...args: EventParameters<Events[Name]>
+  ): Promise<void>
+  parallel<Name extends EventName>(
+    thisArg: NoInfer<EventThisArgument<Events[Name]>>,
+    name: Name,
+    ...args: EventParameters<Events[Name]>
+  ): Promise<void>
+  parallel(...args: unknown[]): Promise<void> {
+    return this.root.events.parallel(...args)
+  }
+
+  serial<Name extends EventName>(
+    name: Name,
+    ...args: EventParameters<Events[Name]>
+  ): Promise<Awaited<EventReturn<Events[Name]>> | undefined>
+  serial<Name extends EventName>(
+    thisArg: NoInfer<EventThisArgument<Events[Name]>>,
+    name: Name,
+    ...args: EventParameters<Events[Name]>
+  ): Promise<Awaited<EventReturn<Events[Name]>> | undefined>
+  serial(...args: unknown[]): Promise<unknown> {
+    return this.root.events.serial(...args)
+  }
+
+  bail<Name extends EventName>(
+    name: Name,
+    ...args: EventParameters<Events[Name]>
+  ): EventReturn<Events[Name]> | undefined
+  bail<Name extends EventName>(
+    thisArg: NoInfer<EventThisArgument<Events[Name]>>,
+    name: Name,
+    ...args: EventParameters<Events[Name]>
+  ): EventReturn<Events[Name]> | undefined
+  bail(...args: unknown[]): unknown {
+    return this.root.events.bail(...args)
+  }
+
+  waterfall<Name extends EventName>(
+    name: Name,
+    ...args: EventParameters<Events[Name]>
+  ): EventReturn<Events[Name]>
+  waterfall<Name extends EventName>(
+    thisArg: NoInfer<EventThisArgument<Events[Name]>>,
+    name: Name,
+    ...args: EventParameters<Events[Name]>
+  ): EventReturn<Events[Name]>
+  waterfall(...args: unknown[]): unknown {
+    return this.root.events.waterfall(...args)
   }
 
   /** 注册一个归当前 Fiber 本轮运行所有的具名服务。 */

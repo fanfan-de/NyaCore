@@ -2,6 +2,11 @@
 
 export const contextMarker = Symbol.for('@nya/core/context')
 
+/** 事件 thisArg 可以实现本协议，按订阅方 Context 过滤局部监听器。 */
+export const contextFilter: unique symbol = Symbol.for(
+  '@nya/core/context.filter',
+) as any
+
 /** Service 实例在提供方 Fiber 进入 ACTIVE 前执行的初始化协议。 */
 export const serviceInit: unique symbol = Symbol.for(
   '@nya/core/service.init',

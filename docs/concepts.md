@@ -6,7 +6,7 @@
 
 本文解释 Nya Core 当前代码中的核心概念、概念之间的关系，以及这些概念在生命周期中的实际行为。它面向第一次阅读代码的开发者，也可以作为编写组件时的心智模型。
 
-本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject 和动态依赖已经可用；Event、配置 Schema、服务隔离、拦截和热重载等能力仍属于后续设计目标，详见 [核心设计](./design.md)。
+本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject、动态依赖和 Event 已经可用；配置 Schema、服务隔离、拦截和热重载等能力仍属于后续设计目标，详见 [核心设计](./design.md)。
 
 ## 1. 一句话理解 Nya Core
 
@@ -608,7 +608,48 @@ Root Fiber
 - 启动失败时，已经安装的子组件也能沿 Effect 所有权回滚；
 - 每个资源都有明确且唯一的生命周期所有者。
 
-## 12. 完整示例
+## 12. Event：带作用域和生命周期的消息派发
+
+事件表达“一件事情已经发生”。应用通过扩展开放的 `Events` 接口声明事件签名：
+
+```ts
+declare module '@nya/core' {
+  interface Events {
+    'record/created'(record: { id: number }): void
+  }
+}
+```
+
+随后注册和派发都会获得参数类型检查：
+
+```ts
+const stop = context.on('record/created', (record) => {
+  console.log(record.id)
+})
+
+context.emit('record/created', { id: 1 })
+await stop()
+```
+
+`on()` 和 `once()` 返回 Disposer。监听器注册本身由订阅 Context 的 Fiber 作为 Effect 所有，因此组件卸载、依赖失效或启动回滚时都会自动移除；手动调用 Disposer 则会立即让监听器对后续派发不可见。
+
+当前支持以下模式：
+
+| API | 当前行为 |
+| --- | --- |
+| `emit()` | 同步依次调用快照中的全部监听器，异常立即传播 |
+| `parallel()` | 同时启动并等待全部监听器，最后用 `AggregateError` 报告全部失败 |
+| `serial()` | 异步依次调用，在首个有效返回值处停止 |
+| `bail()` | 同步依次调用，在首个有效返回值处停止 |
+| `waterfall()` | 把最后一个回调作为终点，以 `next()` 组成可拦截调用链 |
+
+这里的有效返回值是除 `null`、`undefined` 和 `false` 以外的值，所以 `0` 和空字符串同样会截断 `serial()` 或 `bail()`。
+
+`emit()` 不等待监听器返回的 Promise，也不接管异步拒绝；需要等待异步监听器或汇总失败时应使用 `parallel()`，需要有序短路时应使用 `serial()`。
+
+派发可以使用 `context.emit(thisArg, name, ...args)` 传入显式 `thisArg`。如果该对象实现 `[Context.filter](subscriptionContext)`，返回 truthy 的局部监听器才会收到事件；使用 `{ global: true }` 注册的监听器会跳过这项过滤。Hook 会保留订阅方 Context，为后续服务隔离和调用方追踪预留作用域信息。
+
+## 13. 完整示例
 
 下面的例子只使用当前已经实现的 API：
 
@@ -660,33 +701,33 @@ await fiber.dispose()
 
 如果 `apply()`、异步初始化或 CleanupSource 收集失败，`await fiber` 会拒绝，已经成功登记的资源会先被回滚。
 
-## 13. 常见混淆
+## 14. 常见混淆
 
-### 13.1 Component 与 Fiber
+### 14.1 Component 与 Fiber
 
 Component 是定义，Fiber 是一次安装。把状态保存在可复用 Component 定义上，会让多次安装意外共享状态；安装独有状态应放在入口局部变量、配置、class 实例或由该 Fiber 拥有的资源中。
 
-### 13.2 Context 与 Fiber
+### 14.2 Context 与 Fiber
 
 Context 是操作运行时的作用域入口，Fiber 是生命周期和资源账本。`context.fiber` 指向当前实例，但二者不是同一个对象。
 
-### 13.3 Effect 与 Event
+### 14.3 Effect 与 Event
 
-Effect 表示需要撤销的副作用；Event 表示一件事情已经发生。当前代码已经实现 Effect，尚未实现设计中的 Event 系统。
+Effect 表示需要撤销的副作用；Event 表示一件事情已经发生。监听器注册是需要撤销的副作用，因此 Event 系统使用 Effect 把监听器归属到订阅方 Fiber，但事件本身不是 Effect。
 
-### 13.4 `await fiber` 与组件退出
+### 14.4 `await fiber` 与组件退出
 
 `await fiber` 等待当前启动、依赖协调或卸载任务稳定，不表示组件已经退出。启动成功后，Fiber 通常处于 ACTIVE；依赖失效会让它清理并回到 PENDING，`dispose()` 或父 Fiber 清理才会永久销毁它。
 
-### 13.5 PENDING 与依赖等待
+### 14.5 PENDING 与依赖等待
 
 `PENDING` 既可能是安装后协调任务尚未开始的瞬时状态，也可能是稳定的依赖等待状态。对缺少必需服务的 Fiber 执行 `await fiber` 会等待当前协调操作稳定后正常返回，但 Fiber 仍保持 `PENDING`；未来服务出现时，它会收到通知并启动。
 
-### 13.6 Context 作用域与安全沙箱
+### 14.6 Context 作用域与安全沙箱
 
 Context 的原型链作用域用于组织运行时能力和所有权，不隔离文件系统、网络、环境变量或 JavaScript 全局对象。不可信代码需要真正的进程或容器沙箱。
 
-## 14. 当前实现与后续设计的边界
+## 15. 当前实现与后续设计的边界
 
 | 能力 | 当前状态 |
 | --- | --- |
@@ -701,14 +742,14 @@ Context 的原型链作用域用于组织运行时能力和所有权，不隔离
 | Service 与 `ctx.provide()` | 已实现基础版本 |
 | Inject、`ctx.inject()` 与依赖变化驱动重启 | 已实现 |
 | 服务快照与 `ctx.database` 属性代理 | 已实现 |
-| Event 注册与派发 | 尚未实现 |
+| Event 注册、生命周期清理、过滤与多模式派发 | 已实现 |
 | 配置 Schema、更新与重启 | 尚未实现 |
 | 服务隔离、拦截与调用方追踪 | 尚未实现 |
 | Loader、HMR 和外围生态 | 不属于当前 Core 阶段 |
 
 阅读源码或撰写示例时，应以这条边界为准。设计文档描述的是预期终态；本文描述的是当前可以依赖的基础心智模型。
 
-## 15. 贡献者需要维护的不变量
+## 16. 贡献者需要维护的不变量
 
 修改核心运行时行为时，至少应保持以下约束：
 
