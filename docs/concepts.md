@@ -1,6 +1,7 @@
 # Nya Core 核心概念指南
 
-> 状态：Draft<br>
+> 状态：Current<br>
+> 类型：Explanation<br>
 > 适用范围：仓库当前已实现的阶段二运行时<br>
 > 对应包：`@nya/core`
 

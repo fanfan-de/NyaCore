@@ -6,7 +6,9 @@
   "scripts": {
     "build": "npm run build --workspace @nya/core",
     "test": "npm run test --workspace @nya/core",
-    "typecheck": "npm run typecheck --workspace @nya/core && npm run typecheck --workspace @nya/playground",
+    "typecheck": "npm run typecheck --workspace @nya/core && npm run build --workspace @nya/core && npm run typecheck --workspace @nya/playground",
+    "docs:check": "node scripts/check-docs.mjs",
+    "check": "npm run docs:check && npm run typecheck && npm test",
     "dev:core": "npm run build --workspace @nya/core -- --watch",
     "dev:playground": "npm run dev --workspace @nya/playground",
     "playground": "npm run build --workspace @nya/core && npm run start --workspace @nya/playground"
