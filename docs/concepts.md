@@ -2,7 +2,7 @@
 
 > 状态：Current<br>
 > 类型：Explanation<br>
-> 适用范围：仓库当前已实现的阶段二运行时<br>
+> 适用范围：仓库当前已实现的 Core 运行时<br>
 > 对应包：`@nya/core`
 
 本文解释 Nya Core 当前代码中的核心概念、概念之间的关系，以及这些概念在生命周期中的实际行为。它面向第一次阅读代码的开发者，也可以作为编写组件时的心智模型。
@@ -648,7 +648,7 @@ await stop()
 
 `emit()` 不等待监听器返回的 Promise，也不接管异步拒绝；需要等待异步监听器或汇总失败时应使用 `parallel()`，需要有序短路时应使用 `serial()`。
 
-派发可以使用 `context.emit(thisArg, name, ...args)` 传入显式 `thisArg`。如果该对象实现 `[Context.filter](subscriptionContext)`，返回 truthy 的局部监听器才会收到事件；使用 `{ global: true }` 注册的监听器会跳过这项过滤。Hook 会保留订阅方 Context，为后续服务隔离和调用方追踪预留作用域信息。
+派发可以使用 `context.emit(thisArg, name, ...args)` 传入显式 `thisArg`。如果该对象通过 `Context.filter` Symbol 提供接收 `subscriptionContext` 的过滤方法，只有过滤结果为 truthy 的局部监听器才会收到事件；使用 `{ global: true }` 注册的监听器会跳过这项过滤。Hook 会保留订阅方 Context，为后续服务隔离和调用方追踪预留作用域信息。
 
 ## 13. 完整示例
 
