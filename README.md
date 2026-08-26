@@ -39,6 +39,7 @@ npm run playground   # 构建 core 并运行示例
 
 从[文档地图](./docs/README.md)开始：
 
+- [架构总览](./docs/architecture.md)：当前系统边界、核心构件、运行时视图与关键流程；
 - [核心概念](./docs/concepts.md)：当前已经实现的运行时心智模型；
 - [核心设计](./docs/design.md)：面向后续版本的目标设计，不等同于当前行为；
 - [架构决策记录](./docs/adr/README.md)：已经接受的关键技术决策；

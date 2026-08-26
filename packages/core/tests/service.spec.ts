@@ -255,7 +255,7 @@ describe('service injection', () => {
     const app = new Context()
     const apply = vi.fn()
     const guarded = app.installComponent({
-      inject: ['database'],
+      inject: { database: { futureConfig: true } },
       apply,
     })
     const unguarded = app.installComponent({ apply })
@@ -264,6 +264,8 @@ describe('service injection', () => {
 
     expect(guarded.state).toBe(FiberState.PENDING)
     expect(unguarded.state).toBe(FiberState.ACTIVE)
+    expect(guarded.inject).toEqual(new Set(['database']))
+    expect(unguarded.inject).toEqual(new Set())
     expect(app.registry.get({ apply })?.fibers).toEqual(
       new Set([guarded, unguarded]),
     )

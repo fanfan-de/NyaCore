@@ -113,7 +113,7 @@ export class ClassComponent {
 - 函数和对象 `apply` 的返回值是 CleanupSource，用于登记本次启动对应的清理操作；
 - class 通过 `new Constructor(context, config)` 启动，构造结果不会作为 CleanupSource；构造期间调用的 `context.effect()` 仍归本次 Fiber 所有。
 
-当前实现只在 TypeScript 类型层面约束配置，不执行运行时 Schema 校验或转换。组件若要求配置存在或满足某些条件，需要暂时自行检查。
+当前实现只在 TypeScript 类型层面约束配置，不声明或读取静态 `Component.Config`，也不执行运行时 Schema 校验或转换。组件若要求配置存在或满足某些条件，需要暂时自行检查；Standard Schema 仍属于目标设计。
 
 ### 3.4 定义不是实例
 
@@ -257,7 +257,7 @@ ctx.inject(['database'], (ctx) => {
 
 普通组件只能通过 `ctx.database` 或 `ctx.get('database')` 读取已经声明在 `inject` 中的服务；未声明访问会抛错。根 Context 可以读取当前有效服务，提供方也可以在自己的初始化过程中读取自己刚注册的服务。
 
-当前所有 Context 仍共享同名服务的默认 slot，同一名称只能注册一个实现。服务隔离、拦截配置、调用方 Context 追踪、callable Service 和 mixin 尚未实现。
+运行时会把数组或对象形式的 `inject` 复制为每次安装独有的只读名称集合；对象形式当前只读取键，配置值尚无运行时含义。所有 Context 仍共享同名服务的默认 slot，同一名称只能注册一个实现。服务隔离、拦截配置、调用方 Context 追踪、callable Service 和 mixin 尚未实现。
 
 ## 6. Fiber：单次安装的生命周期控制器
 
@@ -290,14 +290,15 @@ Fiber 表示组件定义的**某一次具体安装**。它负责：
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING
-    PENDING --> LOADING: 启动任务开始
+    PENDING --> LOADING: 必需依赖齐备
     LOADING --> ACTIVE: apply 与启动 Effect 完成
     LOADING --> FAILED: 启动失败并回滚
-    LOADING --> UNLOADING: 启动期间依赖失效
-    ACTIVE --> UNLOADING: 依赖消失或实现变化
-    UNLOADING --> PENDING: 必需依赖缺失
-    UNLOADING --> LOADING: 新快照已经就绪
+    LOADING --> UNLOADING: 快照过期或请求 dispose
+    ACTIVE --> UNLOADING: 依赖变化或请求 dispose
+    UNLOADING --> PENDING: 临时卸载完成
     PENDING --> UNLOADING: 启动前请求 dispose
+    FAILED --> LOADING: 新的可用依赖 epoch
+    FAILED --> PENDING: 必需依赖变为不可用
     FAILED --> UNLOADING: dispose
     UNLOADING --> DISPOSED: 清理与脱离完成
 ```

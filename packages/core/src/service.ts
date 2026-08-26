@@ -4,14 +4,12 @@ import type { Context } from './context.js'
 import type { Disposer } from './disposable.js'
 import type { Fiber } from './fiber.js'
 import { FiberState } from './fiber.js'
-import type { ResolvedInject } from './inject.js'
+import type { ResolvedInject } from './component.js'
 import { serviceCheck, serviceInit } from './symbols.js'
 
 /** 一次 `provide()` 产生的具体服务实现。每次重新提供都会获得新的 id。 */
 export interface ServiceImplementation<Value = unknown> {
   readonly id: number
-  readonly name: string
-  readonly slot: symbol
   readonly value: Value
   readonly owner: Fiber
   readonly check?: () => boolean
@@ -23,31 +21,27 @@ export interface DependencySnapshot {
   readonly services: ReadonlyMap<string, ServiceImplementation>
 }
 
+/** 一个服务名的全部当前状态；名称在首次使用后始终映射到同一个 slot。 */
+interface ServiceSlot {
+  readonly consumers: Set<Fiber>
+  implementation?: ServiceImplementation
+}
+
 /**
  * 根 Context 共享的服务注册表。
  *
- * 当前版本中，同名服务在整棵 Context 树内共享一个 slot。解析 API 已显式接收
- * Context，后续加入 isolate 时只需改变 name -> slot 的映射规则。
+ * 当前版本中，同名服务在整棵 Context 树内共享一个 slot。
  */
 export class ServiceRegistry {
-  readonly root: Context
-
   #counter = 0
-  #slots = new Map<string, symbol>()
-  #implementations = new Map<symbol, ServiceImplementation>()
-  #consumers = new Map<symbol, Set<Fiber>>()
-  #owned = new Map<Fiber, Set<ServiceImplementation>>()
+  #slots = new Map<string, ServiceSlot>()
+  #owned = new Map<Fiber, Set<ServiceSlot>>()
 
-  constructor(root: Context) {
-    this.root = root
-  }
-
-  /** 返回服务名称的当前默认 slot；Context 参数为后续隔离解析保留。 */
-  #getSlot(context: Context, name: string) {
-    void context
+  /** 返回服务名称的当前默认 slot。 */
+  #getSlot(name: string) {
     let slot = this.#slots.get(name)
     if (!slot) {
-      slot = Symbol(name)
+      slot = { consumers: new Set() }
       this.#slots.set(name, slot)
     }
     return slot
@@ -73,8 +67,8 @@ export class ServiceRegistry {
     }
 
     return context.fiber.effect(() => {
-      const slot = this.#getSlot(context, name)
-      const current = this.#implementations.get(slot)
+      const slot = this.#getSlot(name)
+      const current = slot.implementation
       if (current) {
         const owner = current.owner.name === '<root>'
           ? '<root>'
@@ -86,20 +80,18 @@ export class ServiceRegistry {
 
       const implementation: ServiceImplementation<Value> = {
         id: ++this.#counter,
-        name,
-        slot,
         value,
         owner: context.fiber,
         check,
       }
 
-      this.#implementations.set(slot, implementation)
+      slot.implementation = implementation
       let owned = this.#owned.get(context.fiber)
       if (!owned) {
         owned = new Set()
         this.#owned.set(context.fiber, owned)
       }
-      owned.add(implementation)
+      owned.add(slot)
 
       // 根 Fiber 等已经 ACTIVE 的提供方可以立即唤醒消费者；普通组件在
       // LOADING 阶段注册的服务要等到其状态真正进入 ACTIVE 后才会通知。
@@ -109,10 +101,10 @@ export class ServiceRegistry {
 
       return async () => {
         // 只允许创建本实现的 disposer 删除本实现，避免旧 disposer 误删后继值。
-        if (this.#implementations.get(slot) !== implementation) return
+        if (slot.implementation !== implementation) return
 
-        this.#implementations.delete(slot)
-        owned?.delete(implementation)
+        slot.implementation = undefined
+        owned?.delete(slot)
         if (owned?.size === 0) this.#owned.delete(context.fiber)
 
         const consumers = this.#notify(slot)
@@ -124,12 +116,11 @@ export class ServiceRegistry {
   }
 
   /** 为一次组件运行捕获全部必需服务；任意一项不可用时返回 undefined。 */
-  capture(context: Context, inject: ResolvedInject): DependencySnapshot | undefined {
+  capture(inject: ResolvedInject): DependencySnapshot | undefined {
     const services = new Map<string, ServiceImplementation>()
 
-    for (const name of inject.keys()) {
-      const slot = this.#getSlot(context, name)
-      const implementation = this.#implementations.get(slot)
+    for (const name of inject) {
+      const implementation = this.#getSlot(name).implementation
 
       if (!implementation || implementation.owner.state !== FiberState.ACTIVE) {
         return
@@ -156,17 +147,12 @@ export class ServiceRegistry {
 
   /** 把 Fiber 加入所有依赖 slot 的反向索引，永久卸载时由返回函数取消。 */
   subscribe(fiber: Fiber, inject: ResolvedInject): Disposer {
-    const subscriptions: Array<[symbol, Set<Fiber>]> = []
+    const subscriptions: ServiceSlot[] = []
 
-    for (const name of inject.keys()) {
-      const slot = this.#getSlot(fiber.context, name)
-      let consumers = this.#consumers.get(slot)
-      if (!consumers) {
-        consumers = new Set()
-        this.#consumers.set(slot, consumers)
-      }
-      consumers.add(fiber)
-      subscriptions.push([slot, consumers])
+    for (const name of inject) {
+      const slot = this.#getSlot(name)
+      slot.consumers.add(fiber)
+      subscriptions.push(slot)
     }
 
     let disposed = false
@@ -174,9 +160,8 @@ export class ServiceRegistry {
       if (disposed) return
       disposed = true
 
-      for (const [slot, consumers] of subscriptions) {
-        consumers.delete(fiber)
-        if (consumers.size === 0) this.#consumers.delete(slot)
+      for (const slot of subscriptions) {
+        slot.consumers.delete(fiber)
       }
     }
   }
@@ -192,17 +177,16 @@ export class ServiceRegistry {
 
     const owned = this.#owned.get(fiber)
     if (!owned) return
-    for (const implementation of owned) {
-      if (this.#implementations.get(implementation.slot) === implementation) {
-        this.#notify(implementation.slot)
+    for (const slot of owned) {
+      if (slot.implementation?.owner === fiber) {
+        this.#notify(slot)
       }
     }
   }
 
   /** Context Proxy 的读取入口：根读取实时值，普通 Fiber 读取本轮固定快照。 */
   get(context: Context, name: string): unknown {
-    const slot = this.#getSlot(context, name)
-    const implementation = this.#implementations.get(slot)
+    const implementation = this.#getSlot(name).implementation
 
     // 提供方在自己的构造、初始化和清理代码中可以访问自己刚提供的服务。
     if (implementation?.owner === context.fiber) {
@@ -217,8 +201,8 @@ export class ServiceRegistry {
     return context.fiber.getInjected(name)
   }
 
-  #notify(slot: symbol) {
-    const consumers = [...this.#consumers.get(slot) ?? []]
+  #notify(slot: ServiceSlot) {
+    const consumers = [...slot.consumers]
     for (const fiber of consumers) fiber.refreshDependencies()
     return consumers
   }

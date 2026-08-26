@@ -247,6 +247,29 @@ describe('component lifecycle', () => {
     expect(sequence).toEqual([2, 1])
   })
 
+  it('finishes permanent disposal after a cleanup failure', async () => {
+    const app = new Context()
+    const error = new Error('cleanup failed')
+    const sequence: number[] = []
+    const component = (context: Context) => {
+      context.effect(() => () => {
+        sequence.push(1)
+        throw error
+      })
+      context.effect(() => () => {
+        sequence.push(2)
+      })
+    }
+
+    const fiber = app.installComponent(component)
+    await fiber
+
+    await expect(fiber.dispose()).rejects.toBe(error)
+    expect(sequence).toEqual([2, 1])
+    expect(fiber.state).toBe(FiberState.DISPOSED)
+    expect(app.registry.get(component)).toBeUndefined()
+  })
+
   it('disposes child components with their parent', async () => {
     const app = new Context()
     const parentDispose = vi.fn()

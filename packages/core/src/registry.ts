@@ -2,10 +2,7 @@
 
 import type { Context } from './context.js'
 import { Fiber } from './fiber.js'
-import type {
-  Component,
-  ResolvedComponent,
-} from './component.js'
+import type { Component } from './component.js'
 import { resolveComponent } from './component.js'
 
 /** 同一个 Component 定义在 Registry 中共享的 Runtime 元数据。 */
@@ -17,27 +14,17 @@ export interface ComponentRuntime {
 }
 
 export class Registry {
-  readonly root: Context
-
   #runtimes = new Map<Component.Callback<any>, ComponentRuntime>()
-
-  constructor(root: Context) {
-    this.root = root
-  }
 
   install<Definition extends Component<any>>(
     parent: Context,
     component: Definition,
     config?: Component.Config<Definition>,
   ): Fiber {
-    // 1. 解析并校验组件定义，得到 Registry 和 Fiber 实际使用的运行信息。
-    const definition: ResolvedComponent = resolveComponent(component)
-
-    // 2. 只有 ACTIVE 或仍处于 LOADING 的父组件才能继续安装子组件。
+    const definition = resolveComponent(component)
     parent.fiber.assertActive()
 
-    // 3. 按组件入口函数复用 Runtime 元数据；同一定义的每次安装
-    //    仍然会获得相互独立的 Context 和 Fiber。
+    // Runtime 属于定义；Context 和 Fiber 属于本次安装。
     let runtime = this.#runtimes.get(definition.callback)
     if (!runtime) {
       runtime = {
@@ -49,26 +36,24 @@ export class Registry {
       this.#runtimes.set(definition.callback, runtime)
     }
 
-    // 4. 从父 Context 派生组件 Context，并创建负责本次安装生命周期的 Fiber。
-    //    Fiber 卸载时，detach 会同步移除实例登记和已经空闲的 Runtime。
     const context = parent.extend()
     let fiber!: Fiber
+    const detach = () => {
+      runtime.fibers.delete(fiber)
+      if (runtime.fibers.size === 0) {
+        this.#runtimes.delete(runtime.callback)
+      }
+    }
     fiber = Fiber.component({
       context,
       parent: parent.fiber,
       runtime,
       inject: definition.inject,
       config,
-      detach: () => {
-        runtime.fibers.delete(fiber)
-        if (runtime.fibers.size === 0) {
-          this.#runtimes.delete(runtime.callback)
-        }
-      },
+      detach,
     })
 
-    // 5. 用本次安装的 Fiber 覆盖子 Context 从原型链继承的父 Fiber，
-    //    并锁定该引用，防止组件在运行期间替换自己的生命周期控制器。
+    // 组件 Context 只覆盖继承来的 Fiber，其余根级构件继续通过原型共享。
     Object.defineProperty(context, 'fiber', {
       configurable: false,
       enumerable: true,
@@ -76,26 +61,19 @@ export class Registry {
       writable: false,
     })
 
-    // 启动前先登记实例，确保启动与卸载流程都能通过 Runtime 找到它。
     runtime.fibers.add(fiber)
 
     try {
-      // 6. 把子组件登记为父 Fiber 的 Effect：Effect 执行时启动子 Fiber，
-      //    清理时卸载子 Fiber，从而在父组件卸载时自然完成级联清理。
+      // 父 Fiber 通过一个 Effect 拥有子 Fiber，建立唯一的级联清理路径。
       parent.fiber.effect(() => {
         fiber.start()
         return () => fiber.dispose()
       }, `ctx.installComponent(${JSON.stringify(runtime.name ?? 'anonymous')})`)
     } catch (error) {
-      // 父 Effect 登记同步失败时，本次安装尚未成立，需要回滚上面的 Runtime 登记。
-      runtime.fibers.delete(fiber)
-      if (runtime.fibers.size === 0) {
-        this.#runtimes.delete(runtime.callback)
-      }
+      detach()
       throw error
     }
 
-    // 7. 返回 Fiber，供调用方等待启动结果或主动触发卸载。
     return fiber
   }
 

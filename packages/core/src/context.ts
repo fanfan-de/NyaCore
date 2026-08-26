@@ -12,8 +12,7 @@ import type {
   EventThisArgument,
 } from './events.js'
 import { Fiber } from './fiber.js'
-import type { Component } from './component.js'
-import type { Inject } from './inject.js'
+import type { Component, Inject } from './component.js'
 import { Registry } from './registry.js'
 import { ServiceRegistry } from './service.js'
 import { contextFilter, contextMarker } from './symbols.js'
@@ -48,28 +47,27 @@ function hasDefinedProperty(target: object, property: PropertyKey) {
   return false
 }
 
+function isServiceProperty(
+  target: object,
+  property: PropertyKey,
+): property is string {
+  return typeof property === 'string'
+    && !isSpecialProperty(property)
+    && !hasDefinedProperty(target, property)
+}
+
 const contextProxyHandler: ProxyHandler<Context> = {
   get(target, property, receiver) {
-    if (
-      typeof property !== 'string'
-      || isSpecialProperty(property)
-      || hasDefinedProperty(target, property)
-    ) {
+    if (!isServiceProperty(target, property)) {
       return Reflect.get(target, property, receiver)
     }
 
-    return (receiver as Context).root.services.get(
-      receiver as Context,
-      property,
-    )
+    const context = receiver as Context
+    return context.root.services.get(context, property)
   },
 
   set(target, property, value, receiver) {
-    if (
-      typeof property !== 'string'
-      || isSpecialProperty(property)
-      || hasDefinedProperty(target, property)
-    ) {
+    if (!isServiceProperty(target, property)) {
       return Reflect.set(target, property, value, receiver)
     }
 
@@ -77,11 +75,7 @@ const contextProxyHandler: ProxyHandler<Context> = {
   },
 
   has(target, property) {
-    if (
-      typeof property !== 'string'
-      || isSpecialProperty(property)
-      || hasDefinedProperty(target, property)
-    ) {
+    if (!isServiceProperty(target, property)) {
       return Reflect.has(target, property)
     }
 
@@ -108,8 +102,8 @@ export class Context {
     // Registry 和根 Fiber 通过 Context 原型链共享；
     // 组件 Context 只用本次安装对应的 Fiber 覆盖 `fiber` 属性。
     this.root = proxy
-    this.services = new ServiceRegistry(proxy)
-    this.registry = new Registry(proxy)
+    this.services = new ServiceRegistry()
+    this.registry = new Registry()
     this.fiber = Fiber.root(proxy)
     this.events = new EventRegistry(proxy)
 

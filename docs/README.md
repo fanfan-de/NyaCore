@@ -6,6 +6,7 @@
 
 | 需求 | 文档 | 类型 | 状态 |
 | --- | --- | --- | --- |
+| 快速理解当前架构 | [架构总览](./architecture.md) | Explanation | Current |
 | 理解当前运行时 | [核心概念](./concepts.md) | Explanation | Current |
 | 了解目标架构 | [核心设计](./design.md) | Specification | Proposed |
 | 查看技术决策 | [架构决策记录](./adr/README.md) | ADR | 按条目确定 |

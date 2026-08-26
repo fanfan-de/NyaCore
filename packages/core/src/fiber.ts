@@ -3,8 +3,7 @@
 import type { Context } from './context.js'
 import { DisposableStack, EffectScope } from './disposable.js'
 import type { CleanupSource, Disposer } from './disposable.js'
-import type { Component } from './component.js'
-import type { ResolvedInject } from './inject.js'
+import type { Component, ResolvedInject } from './component.js'
 import type { ComponentRuntime } from './registry.js'
 import type { DependencySnapshot } from './service.js'
 import { serviceInit } from './symbols.js'
@@ -41,7 +40,6 @@ export class Fiber implements PromiseLike<void> {
 
   /** start() 后建立、最终 dispose() 时撤销的服务依赖反向订阅。 */
   #unsubscribe: Disposer | undefined
-  #mounted = false
 
   // ---------- 单轮运行与服务快照 ----------
 
@@ -62,12 +60,10 @@ export class Fiber implements PromiseLike<void> {
 
   // ---------- 生命周期任务串行化 ----------
 
-  #queue = Promise.resolve()
   #currentOperation = Promise.resolve()
-  #reconcileQueued = false
+  #reconcileOperation: Promise<void> | undefined
 
   #disposeOperation: Promise<void> | undefined
-  #disposeRequested = false
 
   private constructor(options: {
     context: Context
@@ -80,7 +76,7 @@ export class Fiber implements PromiseLike<void> {
     this.context = options.context
     this.parent = options.parent
     this.#runtime = options.runtime
-    this.inject = options.inject ?? new Map()
+    this.inject = options.inject ?? new Set()
     this.#config = options.config
     this.#detach = options.detach
     this.state = options.runtime ? FiberState.PENDING : FiberState.ACTIVE
@@ -125,9 +121,8 @@ export class Fiber implements PromiseLike<void> {
    * 有缺失依赖的组件保持 PENDING，直到 ServiceRegistry 发出变化通知。
    */
   start() {
-    if (this.isRoot || this.#mounted || this.#disposeRequested) return this
+    if (this.isRoot || this.#unsubscribe || this.#disposeOperation) return this
 
-    this.#mounted = true
     this.#unsubscribe = this.context.root.services.subscribe(this, this.inject)
     this.refreshDependencies()
     return this
@@ -137,17 +132,14 @@ export class Fiber implements PromiseLike<void> {
   refreshDependencies() {
     if (
       this.isRoot
-      || !this.#mounted
-      || this.#disposeRequested
+      || !this.#unsubscribe
+      || this.#disposeOperation
       || this.state === FiberState.DISPOSED
     ) {
       return
     }
 
-    this.#desiredSnapshot = this.context.root.services.capture(
-      this.context,
-      this.inject,
-    )
+    this.#desiredSnapshot = this.context.root.services.capture(this.inject)
     this.#scheduleReconcile()
   }
 
@@ -202,10 +194,8 @@ export class Fiber implements PromiseLike<void> {
   dispose(): Promise<void> {
     if (this.#disposeOperation) return this.#disposeOperation
 
-    this.#disposeRequested = true
     this.#desiredSnapshot = undefined
     this.#disposeOperation = this.#enqueue(() => this.#dispose())
-    this.#setCurrent(this.#disposeOperation)
     return this.#disposeOperation
   }
 
@@ -235,35 +225,29 @@ export class Fiber implements PromiseLike<void> {
   }
 
   #enqueue(operation: () => Promise<void>) {
-    const task = this.#queue.then(operation)
-    this.#queue = task.catch(() => {})
+    const task = this.#currentOperation.catch(() => {}).then(operation)
+    this.#currentOperation = task
     void task.catch(() => {})
     return task
   }
 
-  #setCurrent(operation: Promise<void>) {
-    this.#currentOperation = operation
-  }
-
   #scheduleReconcile() {
-    if (this.#reconcileQueued || this.#disposeRequested) return
-    this.#reconcileQueued = true
+    if (this.#reconcileOperation || this.#disposeOperation) return
 
-    const operation = this.#enqueue(async () => {
+    this.#reconcileOperation = this.#enqueue(async () => {
       try {
         await this.#reconcile()
       } finally {
-        this.#reconcileQueued = false
-        if (!this.#disposeRequested && !this.#isSettled()) {
+        this.#reconcileOperation = undefined
+        if (!this.#disposeOperation && !this.#isSettled()) {
           this.#scheduleReconcile()
         }
       }
     })
-    this.#setCurrent(operation)
   }
 
   #isSettled() {
-    if (this.#disposeRequested || this.state === FiberState.DISPOSED) return true
+    if (this.#disposeOperation || this.state === FiberState.DISPOSED) return true
 
     const desired = this.#desiredSnapshot
     if (!desired) {
@@ -283,7 +267,7 @@ export class Fiber implements PromiseLike<void> {
 
   /** 收敛到最新快照：旧运行必须先卸载，缺依赖时停在 PENDING。 */
   async #reconcile() {
-    while (!this.#disposeRequested) {
+    while (!this.#disposeOperation) {
       const desired = this.#desiredSnapshot
       const active = this.#activeSnapshot
 
@@ -312,7 +296,7 @@ export class Fiber implements PromiseLike<void> {
 
   async #startRun(snapshot: DependencySnapshot) {
     const runtime = this.#runtime
-    if (!runtime || this.#disposeRequested) return
+    if (!runtime || this.#disposeOperation) return
 
     this.#runEffects = new DisposableStack()
     this.#activeSnapshot = snapshot
@@ -322,20 +306,7 @@ export class Fiber implements PromiseLike<void> {
 
     try {
       this.effect(
-        () => {
-          if (runtime.kind === 'constructor') {
-            const Constructor = runtime.callback as Component.Constructor<any>
-            const instance = new Constructor(this.context, this.#config)
-            const init = Reflect.get(instance, serviceInit)
-            if (typeof init === 'function') {
-              return Reflect.apply(init, instance, []) as CleanupSource
-            }
-            return
-          }
-
-          const apply = runtime.callback as Component.Function<any>
-          return apply(this.context, this.#config)
-        },
+        () => this.#invoke(runtime),
         `ctx.installComponent(${JSON.stringify(runtime.name ?? 'anonymous')})`,
       )
 
@@ -367,7 +338,7 @@ export class Fiber implements PromiseLike<void> {
     // 入口异步启动期间依赖可能已经失效。旧入口完成后必须直接回滚，
     // 不能短暂暴露为 ACTIVE，也不能与新入口并发。
     if (
-      this.#disposeRequested
+      this.#disposeOperation
       || this.#desiredSnapshot?.epoch !== snapshot.epoch
     ) {
       await this.#unloadRun()
@@ -384,36 +355,27 @@ export class Fiber implements PromiseLike<void> {
 
     this.#setState(FiberState.UNLOADING)
     const effects = this.#runEffects
-    let cleanupError: unknown
 
     try {
       await effects?.dispose()
-    } catch (error) {
-      cleanupError = error
     } finally {
       // 清理函数执行期间仍能读取旧 snapshot；全部清理结束后才解除固定。
       this.#runEffects = undefined
       this.#activeSnapshot = undefined
-      if (!this.#disposeRequested) this.#setState(FiberState.PENDING)
+      if (!this.#disposeOperation) this.#setState(FiberState.PENDING)
     }
-
-    if (cleanupError) throw cleanupError
   }
 
   async #dispose() {
     if (this.state === FiberState.DISPOSED) return
 
     this.#setState(FiberState.UNLOADING)
-    let cleanupError: unknown
 
     try {
       await this.#unloadRun()
-    } catch (error) {
-      cleanupError = error
     } finally {
       this.#unsubscribe?.()
       this.#unsubscribe = undefined
-      this.#mounted = false
       this.#desiredSnapshot = undefined
       this.#failedEpoch = undefined
 
@@ -423,7 +385,6 @@ export class Fiber implements PromiseLike<void> {
       if (this.isRoot) {
         // 根 Fiber 的 dispose 只清空整棵资源树，根 Context 之后仍可复用。
         this.#runEffects = new DisposableStack()
-        this.#disposeRequested = false
         this.#disposeOperation = undefined
         this.error = undefined
         this.#setState(FiberState.ACTIVE)
@@ -431,8 +392,20 @@ export class Fiber implements PromiseLike<void> {
         this.#setState(FiberState.DISPOSED)
       }
     }
+  }
 
-    if (cleanupError) throw cleanupError
+  #invoke(runtime: ComponentRuntime): CleanupSource {
+    if (runtime.kind === 'function') {
+      const apply = runtime.callback as Component.Function<any>
+      return apply(this.context, this.#config)
+    }
+
+    const Constructor = runtime.callback as Component.Constructor<any>
+    const instance = new Constructor(this.context, this.#config)
+    const init = Reflect.get(instance, serviceInit)
+    if (typeof init === 'function') {
+      return Reflect.apply(init, instance, []) as CleanupSource
+    }
   }
 
   #setState(state: FiberState) {

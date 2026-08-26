@@ -79,13 +79,9 @@ function formatEventName(name: string | symbol) {
 
 /** 根 Context 共享的监听器注册表。派生 Context 只影响监听器所有权与过滤。 */
 export class EventRegistry {
-  readonly root: Context
-
   #hooks = new Map<string | symbol, EventHook[]>()
 
-  constructor(root: Context) {
-    this.root = root
-  }
+  constructor(readonly root: Context) {}
 
   /** 注册监听器，并把注册行为放入订阅方 Fiber 当前运行的 Effect 树。 */
   on(
@@ -119,24 +115,22 @@ export class EventRegistry {
     let active = false
 
     const unregister = () => {
-      if (!active || !hook) return false
+      if (!active || !hook) return
       active = false
       const current = hook
-      // EffectScope 本身会一直留在所属运行的栈中；主动清理 Hook 引用可让
-      // 已手动取消或已经触发的 once listener 提前被垃圾回收。
-      hook = undefined
+      hook = undefined // 手动取消后立即释放 callback 与 context 引用。
 
       const hooks = this.#hooks.get(name)
-      if (!hooks) return false
+      if (!hooks) return
 
       const index = hooks.indexOf(current)
-      if (index < 0) return false
+      if (index < 0) return
       hooks.splice(index, 1)
       if (hooks.length === 0) this.#hooks.delete(name)
-      return true
     }
 
     const disposeEffect = context.fiber.effect(() => {
+      const current = hook!
       let hooks = this.#hooks.get(name)
       if (!hooks) {
         hooks = []
@@ -144,9 +138,9 @@ export class EventRegistry {
       }
 
       if (prepend) {
-        hooks.unshift(hook!)
+        hooks.unshift(current)
       } else {
-        hooks.push(hook!)
+        hooks.push(current)
       }
       active = true
 
@@ -236,10 +230,10 @@ export class EventRegistry {
       throw new TypeError('waterfall requires a final next callback')
     }
 
-    const callbacks = hooks.map(hook => hook.callback)
+    let index = 0
     const next = (): unknown => {
-      const callback = callbacks.shift()
-      if (callback) return Reflect.apply(callback, thisArg, [...args, next])
+      const hook = hooks[index++]
+      if (hook) return Reflect.apply(hook.callback, thisArg, [...args, next])
       return Reflect.apply(fallback, undefined, [...args, next])
     }
     return next()

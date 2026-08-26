@@ -27,8 +27,9 @@ export type {
 export { Fiber, FiberState } from './fiber.js'
 export type {
   Component,
+  Inject,
+  ResolvedInject,
 } from './component.js'
-export type { Inject, ResolvedInject } from './inject.js'
 export { Registry } from './registry.js'
 export type { ComponentRuntime } from './registry.js'
 export { Service, ServiceRegistry } from './service.js'
