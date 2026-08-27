@@ -5,7 +5,7 @@ import { DisposableStack, EffectScope } from './disposable.js'
 import type { CleanupSource, Disposer } from './disposable.js'
 import type { Component, ResolvedInject } from './component.js'
 import type { ComponentRuntime } from './registry.js'
-import type { DependencySnapshot } from './service.js'
+import type { DependencySnapshot, ServiceAddress } from './service.js'
 import { serviceInit } from './symbols.js'
 import { resolveConfig } from './config.js'
 
@@ -141,7 +141,11 @@ export class Fiber implements PromiseLike<void> {
   start() {
     if (this.isRoot || this.#unsubscribe || this.#disposeOperation) return this
 
-    this.#unsubscribe = this.context.root.services.subscribe(this, this.inject)
+    this.#unsubscribe = this.context.root.services.subscribe(
+      this.context,
+      this,
+      this.inject,
+    )
     try {
       this.#config = resolveConfig(this.#runtime?.Config, this.#configInput)
       this.#configInput = undefined
@@ -165,18 +169,25 @@ export class Fiber implements PromiseLike<void> {
       return
     }
 
-    this.#desiredSnapshot = this.context.root.services.capture(this.inject)
+    this.#desiredSnapshot = this.context.root.services.capture(
+      this.context,
+      this.inject,
+    )
     this.#scheduleReconcile()
   }
 
   /** Context Proxy 只能从当前运行快照读取已声明的依赖。 */
-  getInjected(name: string) {
+  getInjected(name: string, address: ServiceAddress) {
     if (!this.inject.has(name)) {
       throw new Error(`cannot get service "${name}" without inject`)
     }
 
     const implementation = this.#activeSnapshot?.services.get(name)
-    if (!implementation) {
+    if (
+      !implementation
+      || implementation.address.name !== address.name
+      || implementation.address.label !== address.label
+    ) {
       throw new Error(
         `cannot get required service "${name}" in inactive context`,
       )

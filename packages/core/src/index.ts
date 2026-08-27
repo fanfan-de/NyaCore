@@ -38,6 +38,7 @@ export type {
   DependencySnapshot,
   ServiceImplementation,
 } from './service.js'
+export type { IsolationLabel } from './symbols.js'
 export {
   contextFilter,
   contextMarker,

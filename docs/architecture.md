@@ -10,7 +10,7 @@
 
 ## 1. 三十秒理解
 
-Nya Core 是一个嵌入宿主 JavaScript / TypeScript 进程的**作用域组件运行时**：Registry 将可复用的组件定义安装为独立的 Context 与 Fiber；Context 表达组件从哪个作用域观察和操作运行时，Fiber 管理该组件实例的状态、依赖快照、已校验配置和 Effect；ServiceRegistry 与配置版本共同驱动 Fiber 串行停止和重新启动，所有资源通过 Effect 所有权关系完成失败回滚和级联清理。
+Nya Core 是一个嵌入宿主 JavaScript / TypeScript 进程的**作用域组件运行时**：Registry 将可复用的组件定义安装为独立的 Context 与 Fiber；Context 表达组件从哪个服务隔离视图观察和操作运行时，Fiber 管理该组件实例的状态、依赖快照、已校验配置和 Effect；ServiceRegistry 与配置版本共同驱动 Fiber 串行停止和重新启动，所有资源通过 Effect 所有权关系完成失败回滚和级联清理。
 
 可以把核心模型压缩为：
 
@@ -65,7 +65,7 @@ Loader、配置文件、HMR、控制台输出和分布式生命周期不属于�
 flowchart TB
     Root["Root Context<br/>一棵运行时树的入口"]
     Registry["Registry<br/>安装与 Runtime 索引"]
-    Services["ServiceRegistry<br/>服务 slot、实现与消费者"]
+    Services["ServiceRegistry<br/>(服务名, 隔离标签) slot、实现与消费者"]
     Events["EventRegistry<br/>监听 Hook 与派发"]
     RootFiber["Root Fiber<br/>根资源所有者"]
 
@@ -104,7 +104,7 @@ flowchart TB
 
 | 构件 | 当前职责 | 关键证据 |
 | --- | --- | --- |
-| Context | 创建和派生作用域；把安装、Effect、Service 和 Event 操作委托给对应构件 | [`context.ts`](../packages/core/src/context.ts) |
+| Context | 创建、派生和隔离作用域；把安装、Effect、Service 和 Event 操作委托给对应构件 | [`context.ts`](../packages/core/src/context.ts) |
 | Component 解析 | 接受函数、构造器或带 `apply` 的对象；归一化入口、名称和 Inject | [`component.ts`](../packages/core/src/component.ts) |
 | Registry / Component Runtime | 把定义安装为 Context + Fiber；按入口引用索引同一定义产生的 Fiber | [`registry.ts`](../packages/core/src/registry.ts) |
 | Fiber | 串行协调单次安装的启动、临时卸载、重启和永久销毁；固定本轮依赖快照 | [`fiber.ts`](../packages/core/src/fiber.ts) |
@@ -131,7 +131,7 @@ flowchart LR
     subgraph Space["空间：Context 派生关系"]
         direction TB
         RootContext["Root Context"] -->|"派生"| ParentContext["Parent Context"]
-        ParentContext -->|"派生"| ChildContext["Child Context"]
+        ParentContext -->|"extend / isolate"| ChildContext["Child Context<br/>可覆盖单项服务标签"]
     end
 
     subgraph Ownership["资源：Fiber / Effect 所有权"]
@@ -143,7 +143,7 @@ flowchart LR
 
     subgraph Dependency["激活：Service 依赖图"]
         direction TB
-        Provider["Provider Fiber"] -->|"provide"| Slot["Service slot"]
+        Provider["Provider Fiber"] -->|"provide"| Slot["Service slot<br/>name + label"]
         Slot -->|"固定快照 + 变化通知"| Consumer["Consumer Fiber"]
     end
 ```
@@ -234,7 +234,7 @@ Registry 把“启动子 Fiber，并在清理时调用其 `dispose()`”登记�
 
 ### 6.2 服务变化驱动重新协调
 
-ServiceRegistry 用实现 id 组成依赖 epoch。消费者一轮运行期间固定使用同一份快照；即使服务变化，旧快照也会一直保留到旧运行清理完成。
+ServiceRegistry 先按消费者 Context 把每个依赖名解析为 `(服务名, 隔离标签)` 地址，再用捕获到的实现 id 组成依赖 epoch。隔离地址严格匹配，没有实现时不会回退默认 slot。消费者一轮运行期间固定使用同一份快照；即使服务变化，旧快照也会一直保留到旧运行清理完成。
 
 ```mermaid
 sequenceDiagram
@@ -244,7 +244,7 @@ sequenceDiagram
     participant OldEffects as 旧运行 Effect 栈
     participant Entry as 组件入口
 
-    Services->>Fiber: 相关 Service 跨越可用边界或实现变化
+    Services->>Fiber: 同一服务地址跨越可用边界或实现变化
     Fiber->>Services: capture(context, inject)
     Services-->>Fiber: 新目标快照或 undefined
     Fiber-->>Fiber: 将 reconcile 放入同一串行队列
@@ -311,8 +311,9 @@ flowchart TB
 8. 启动失败必须回滚本轮已经登记的资源、服务和监听器。
 9. 多次 `dispose()` 不能重复释放同一资源，单个清理失败不能阻止其余清理尝试。
 10. Context 派生不能修改父 Context，也不能替换根、Registry、ServiceRegistry、EventRegistry 或 Fiber 等核心引用。
+11. 服务地址必须同时包含 Root、服务名和隔离标签；缺失隔离实现时不能回退默认地址。
 
-这些行为分别由[生命周期测试](../packages/core/tests/lifecycle.spec.ts)、[服务依赖测试](../packages/core/tests/service.spec.ts)和[事件测试](../packages/core/tests/events.spec.ts)覆盖。完整概念解释见[核心概念指南](./concepts.md)。
+这些行为分别由[生命周期测试](../packages/core/tests/lifecycle.spec.ts)、[服务依赖测试](../packages/core/tests/service.spec.ts)、[服务隔离测试](../packages/core/tests/isolation.spec.ts)和[事件测试](../packages/core/tests/events.spec.ts)覆盖。完整概念解释见[核心概念指南](./concepts.md)。
 
 ## 8. 当前实现与目标设计的边界
 
@@ -322,9 +323,9 @@ flowchart TB
 | --- | --- | --- |
 | Component | 函数、class、对象定义；每次安装独立 Context 与 Fiber | Loader、模块发现与 HMR |
 | Config | 同步 Standard Schema 校验与转换；`fiber.config`、`update()`、`restart()` 与快速更新收敛 | Loader 读写、配置文件持久化与 HMR |
-| Service | 根树共享同名默认 slot；Inject 快照驱动消费者启停 | 服务隔离、拦截、调用方追踪、callable Service 与 mixin |
+| Service | `(服务名, 隔离标签)` 严格寻址；Inject 快照按地址驱动消费者启停；最小 `Service` 基类、`init` 与 `check` | Context 拦截、调用方追踪、callable Service 与 mixin |
 | Effect | CleanupSource、失败回滚、幂等 LIFO 清理和聚合错误 | 可观察的 Effect 诊断树与更完整调试工具 |
-| Event | 生命周期绑定、Context 过滤和五种派发模式 | 与未来隔离和调用方追踪的进一步组合 |
+| Event | 生命周期绑定、Context 过滤和五种派发模式 | Service 作为 `thisArg` 时结合调用方隔离标签过滤 |
 | 包边界 | 当前只有 `@nya/core` 和 playground | `@nya/loader`、`@nya/hmr` 等外围包 |
 
 目标语义、非目标和建议的后续包见[核心设计](./design.md)。其中标记为 Proposed 的内容应在图中使用虚线或 `«proposed»`，并与本文的 Current 视图分开维护。

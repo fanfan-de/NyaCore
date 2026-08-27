@@ -7,7 +7,7 @@
 
 本文解释 Nya Core 当前代码中的核心概念、概念之间的关系，以及这些概念在生命周期中的实际行为。它面向第一次阅读代码的开发者，也可以作为编写组件时的心智模型。
 
-本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject、动态依赖、Event 和同步配置生命周期已经可用；服务隔离、拦截、Logger、Loader 和 HMR 等能力仍属于后续设计目标，详见 [核心设计](./design.md)。
+本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject、严格服务隔离、动态依赖、Event 和同步配置生命周期已经可用；Context 拦截、调用方追踪、Logger、Loader 和 HMR 等能力仍属于后续设计目标，详见 [核心设计](./design.md)。
 
 ## 1. 一句话理解 Nya Core
 
@@ -230,7 +230,38 @@ Child Component Context
 
 每次安装普通组件时，Registry 会先从父 Context 派生新 Context，再在新 Context 上定义只读的本次 Fiber。
 
-### 5.4 Context 识别
+### 5.4 服务隔离 Context
+
+`context.isolate(name, label?)` 为指定服务名派生一个局部解析视图：
+
+```ts
+const testContext = app.isolate('database')
+testContext.provide('database', testDatabase)
+```
+
+`isolate()` 不修改原 Context。公开类型 `IsolationLabel` 是 `symbol` 的别名；服务名必须是非空字符串，显式标签必须是 Symbol。省略标签时，每次调用都会创建新的唯一标签；如果同一 Root 中的两个 Context 使用同一个显式标签，它们会共享该服务地址：
+
+```ts
+const sharedDatabase = Symbol('shared database')
+const first = app.isolate('database', sharedDatabase)
+const second = app.extend().isolate('database', sharedDatabase)
+```
+
+隔离映射沿 Context 原型链继承，并且只覆盖指定服务名，因此可以通过链式调用组合多个服务空间：
+
+```ts
+const scoped = app
+  .isolate('database')
+  .isolate('cache')
+```
+
+服务身份实际由 Root、服务名和隔离标签共同确定。隔离采用严格匹配：默认 Context 中的 `database` 不能满足隔离消费者，隔离实现也不会反向替代默认实现；当前地址缺少有效服务时，消费者保持 `PENDING`。即使不同 Root 复用同一个 Symbol，它们的服务也彼此独立。
+
+`isolate()` 只是派生 Context，不创建 Fiber，也不是可以独立销毁的生命周期容器。服务注册、组件和 Effect 仍归调用它们时对应的 Fiber 所有。隔离只约束 Nya 的服务解析与依赖通知，不隔离同一进程中的文件系统、网络或 JavaScript 全局对象。
+
+上述身份、严格匹配和生命周期边界记录在 [ADR-0003](./adr/0003-service-isolation.md) 中。
+
+### 5.5 Context 识别
 
 `Context.is(value)` 不只依赖 `instanceof`，而是检查：
 
@@ -242,7 +273,7 @@ Symbol.for('@nya/core/context')
 
 该标记只是运行时互操作协议，不是安全机制。具有任意 JavaScript 执行能力的代码可以伪造属性；Context 也不构成进程或权限沙箱。
 
-### 5.5 Service 与 Inject
+### 5.6 Service 与 Inject
 
 `ctx.provide(name, value)` 把一个具名能力注册为当前 Fiber 本轮运行拥有的 Effect。消费者可以在 Component 上声明必需依赖：
 
@@ -267,7 +298,13 @@ ctx.inject(['database'], (ctx) => {
 
 普通组件只能通过 `ctx.database` 或 `ctx.get('database')` 读取已经声明在 `inject` 中的服务；未声明访问会抛错。根 Context 可以读取当前有效服务，提供方也可以在自己的初始化过程中读取自己刚注册的服务。
 
-运行时会把数组或对象形式的 `inject` 复制为每次安装独有的只读名称集合；对象形式当前只读取键，配置值尚无运行时含义。所有 Context 仍共享同名服务的默认 slot，同一名称只能注册一个实现。服务隔离、拦截配置、调用方 Context 追踪、callable Service 和 mixin 尚未实现。
+运行时会把数组或对象形式的 `inject` 复制为每次安装独有的只读名称集合；对象形式当前只读取键，配置值尚无运行时含义。`provide()`、显式 `get()`、属性读取、依赖捕获和变化通知都按照调用 Context 的 `(服务名, 隔离标签)` 定位同一个 slot；同一地址只能注册一个实现，不同标签则可以同时提供同名服务。
+
+`'database' in context` 也只观察当前隔离地址是否已被运行时认识，例如发生过服务注册或依赖声明；其他标签存在同名服务不会使这个判断变成 `true`。它不等同于“当前存在 ACTIVE 实现”，实际值仍应通过属性读取或 `get()` 获取。
+
+Core 已提供最小 `Service` 基类。子类可以通过 `static provide` 或构造器参数声明服务名，实例会自动注册到当前 Context；`Service.init` 的异步初始化会阻止服务在完成前变为可用，`Service.check` 可以让实例暂时不满足消费者依赖。`Service.config`、`Service.invoke`、`Service.extend`、callable Service 和 mixin 仍属于后续高级协议。
+
+Context 拦截配置和调用方 Context 追踪尚未实现。Service 作为事件 `thisArg` 时按照调用方隔离标签过滤监听器也依赖该追踪能力，因此本轮服务隔离不应被理解为已经完成事件隔离。
 
 ## 6. Fiber：单次安装的生命周期控制器
 
@@ -687,7 +724,7 @@ await stop()
 
 `emit()` 不等待监听器返回的 Promise，也不接管异步拒绝；需要等待异步监听器或汇总失败时应使用 `parallel()`，需要有序短路时应使用 `serial()`。
 
-派发可以使用 `context.emit(thisArg, name, ...args)` 传入显式 `thisArg`。如果该对象通过 `Context.filter` Symbol 提供接收 `subscriptionContext` 的过滤方法，只有过滤结果为 truthy 的局部监听器才会收到事件；使用 `{ global: true }` 注册的监听器会跳过这项过滤。Hook 会保留订阅方 Context，为后续服务隔离和调用方追踪预留作用域信息。
+派发可以使用 `context.emit(thisArg, name, ...args)` 传入显式 `thisArg`。如果该对象通过 `Context.filter` Symbol 提供接收 `subscriptionContext` 的过滤方法，只有过滤结果为 truthy 的局部监听器才会收到事件；使用 `{ global: true }` 注册的监听器会跳过这项过滤。Hook 会保留订阅方 Context，为后续让 Service `thisArg` 结合调用方 Context 和隔离标签过滤监听器预留作用域信息。
 
 ## 13. 完整示例
 
@@ -765,7 +802,7 @@ Effect 表示需要撤销的副作用；Event 表示一件事情已经发生。�
 
 ### 14.6 Context 作用域与安全沙箱
 
-Context 的原型链作用域用于组织运行时能力和所有权，不隔离文件系统、网络、环境变量或 JavaScript 全局对象。不可信代码需要真正的进程或容器沙箱。
+Context 的原型链作用域以及 `isolate()` 用于组织服务可见性和运行时所有权，不隔离文件系统、网络、环境变量或 JavaScript 全局对象。不可信代码需要真正的进程或容器沙箱。
 
 ## 15. 当前实现与后续设计的边界
 
@@ -780,13 +817,15 @@ Context 的原型链作用域用于组织运行时能力和所有权，不隔离
 | 父子组件级联卸载 | 已实现 |
 | Thenable Fiber | 已实现 |
 | Service 与 `ctx.provide()` | 已实现基础版本 |
+| 最小 `Service` 基类、`Service.init` 与 `Service.check` | 已实现 |
 | Inject、`ctx.inject()` 与依赖变化驱动重启 | 已实现 |
 | 服务快照与 `ctx.database` 属性代理 | 已实现 |
+| 严格服务隔离与按地址通知 | 已实现 |
 | Event 注册、生命周期清理、过滤与多模式派发 | 已实现 |
 | Standard Schema 同步校验与转换 | 已实现 |
 | `fiber.config`、`update()` 与 `restart()` | 已实现 |
 | 配置与依赖变化串行化、快速更新收敛 | 已实现 |
-| 服务隔离、拦截与调用方追踪 | 尚未实现 |
+| Context 拦截、调用方追踪与隔离事件过滤 | 尚未实现 |
 | Logger 与 Effect 树诊断 | 尚未实现 |
 | Loader、HMR 和外围生态 | 不属于当前 Core 阶段 |
 
@@ -808,5 +847,7 @@ Context 的原型链作用域用于组织运行时能力和所有权，不隔离
 10. 同一个 Fiber 的启动和卸载不能并发执行。
 11. 配置更新与依赖变化必须经过同一串行协调过程，并最终收敛到最新目标。
 12. 配置校验失败不能改变已稳定运行的旧配置和 Effect。
+13. 服务隔离严格匹配当前地址，缺失时不能回退默认实现。
+14. 同一轮运行及其清理只能读取启动时捕获的服务快照。
 
 这些不变量比某个类的内部字段布局更重要。内部实现可以演进，但公开语义不应在没有相应设计和测试更新的情况下悄然改变。

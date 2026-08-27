@@ -5,11 +5,24 @@ import type { Disposer } from './disposable.js'
 import type { Fiber } from './fiber.js'
 import { FiberState } from './fiber.js'
 import type { ResolvedInject } from './component.js'
-import { serviceCheck, serviceInit } from './symbols.js'
+import type { IsolationLabel } from './symbols.js'
+import {
+  contextIsolations,
+  serviceCheck,
+  serviceInit,
+} from './symbols.js'
+
+/** 一个服务实现所在的严格解析地址。 */
+export interface ServiceAddress {
+  readonly name: string
+  readonly label: IsolationLabel
+}
 
 /** 一次 `provide()` 产生的具体服务实现。每次重新提供都会获得新的 id。 */
 export interface ServiceImplementation<Value = unknown> {
   readonly id: number
+  readonly address: ServiceAddress
+  readonly providerContext: Context
   readonly value: Value
   readonly owner: Fiber
   readonly check?: () => boolean
@@ -23,6 +36,7 @@ export interface DependencySnapshot {
 
 /** 一个服务名的全部当前状态；名称在首次使用后始终映射到同一个 slot。 */
 interface ServiceSlot {
+  readonly address: ServiceAddress
   readonly consumers: Set<Fiber>
   implementation?: ServiceImplementation
 }
@@ -30,26 +44,59 @@ interface ServiceSlot {
 /**
  * 根 Context 共享的服务注册表。
  *
- * 当前版本中，同名服务在整棵 Context 树内共享一个 slot。
+ * 同名服务按 Context 解析出的隔离标签分配独立 slot。
  */
 export class ServiceRegistry {
   #counter = 0
-  #slots = new Map<string, ServiceSlot>()
+  #defaultLabels = new Map<string, IsolationLabel>()
+  #slots = new Map<string, Map<IsolationLabel, ServiceSlot>>()
   #owned = new Map<Fiber, Set<ServiceSlot>>()
 
-  /** 返回服务名称的当前默认 slot。 */
-  #getSlot(name: string) {
-    let slot = this.#slots.get(name)
+  /** 把一个 Context 中的服务名解析为 Root 内唯一的严格地址。 */
+  #resolveAddress(context: Context, name: string): ServiceAddress {
+    if (context.root.services !== this) {
+      throw new Error('cannot resolve a service from another Context tree')
+    }
+    if (typeof name !== 'string' || name.length === 0) {
+      throw new TypeError('invalid service name: expected a non-empty string')
+    }
+
+    let label = context[contextIsolations][name]
+    if (label === undefined) {
+      label = this.#defaultLabels.get(name)
+      if (!label) {
+        label = Symbol(name)
+        this.#defaultLabels.set(name, label)
+      }
+    }
+
+    return { name, label }
+  }
+
+  /** 返回当前 Context 中服务名称对应的稳定 slot。 */
+  #getSlot(context: Context, name: string) {
+    const address = this.#resolveAddress(context, name)
+    let labels = this.#slots.get(name)
+    if (!labels) {
+      labels = new Map()
+      this.#slots.set(name, labels)
+    }
+
+    let slot = labels.get(address.label)
     if (!slot) {
-      slot = { consumers: new Set() }
-      this.#slots.set(name, slot)
+      slot = {
+        address: Object.freeze(address),
+        consumers: new Set(),
+      }
+      labels.set(address.label, slot)
     }
     return slot
   }
 
-  /** 某个名称是否已经被依赖声明或服务注册认识。 */
-  has(name: string) {
-    return this.#slots.has(name)
+  /** 当前 Context 的服务地址是否已经被依赖声明或服务注册认识。 */
+  has(context: Context, name: string) {
+    const address = this.#resolveAddress(context, name)
+    return this.#slots.get(name)?.has(address.label) ?? false
   }
 
   /**
@@ -67,7 +114,7 @@ export class ServiceRegistry {
     }
 
     return context.fiber.effect(() => {
-      const slot = this.#getSlot(name)
+      const slot = this.#getSlot(context, name)
       const current = slot.implementation
       if (current) {
         const owner = current.owner.name === '<root>'
@@ -80,6 +127,8 @@ export class ServiceRegistry {
 
       const implementation: ServiceImplementation<Value> = {
         id: ++this.#counter,
+        address: slot.address,
+        providerContext: context,
         value,
         owner: context.fiber,
         check,
@@ -116,11 +165,14 @@ export class ServiceRegistry {
   }
 
   /** 为一次组件运行捕获全部必需服务；任意一项不可用时返回 undefined。 */
-  capture(inject: ResolvedInject): DependencySnapshot | undefined {
+  capture(
+    context: Context,
+    inject: ResolvedInject,
+  ): DependencySnapshot | undefined {
     const services = new Map<string, ServiceImplementation>()
 
     for (const name of inject) {
-      const implementation = this.#getSlot(name).implementation
+      const implementation = this.#getSlot(context, name).implementation
 
       if (!implementation || implementation.owner.state !== FiberState.ACTIVE) {
         return
@@ -146,11 +198,15 @@ export class ServiceRegistry {
   }
 
   /** 把 Fiber 加入所有依赖 slot 的反向索引，永久卸载时由返回函数取消。 */
-  subscribe(fiber: Fiber, inject: ResolvedInject): Disposer {
+  subscribe(
+    context: Context,
+    fiber: Fiber,
+    inject: ResolvedInject,
+  ): Disposer {
     const subscriptions: ServiceSlot[] = []
 
     for (const name of inject) {
-      const slot = this.#getSlot(name)
+      const slot = this.#getSlot(context, name)
       slot.consumers.add(fiber)
       subscriptions.push(slot)
     }
@@ -186,7 +242,8 @@ export class ServiceRegistry {
 
   /** Context Proxy 的读取入口：根读取实时值，普通 Fiber 读取本轮固定快照。 */
   get(context: Context, name: string): unknown {
-    const implementation = this.#getSlot(name).implementation
+    const slot = this.#getSlot(context, name)
+    const implementation = slot.implementation
 
     // 提供方在自己的构造、初始化和清理代码中可以访问自己刚提供的服务。
     if (implementation?.owner === context.fiber) {
@@ -198,7 +255,7 @@ export class ServiceRegistry {
       return implementation.value
     }
 
-    return context.fiber.getInjected(name)
+    return context.fiber.getInjected(name, slot.address)
   }
 
   #notify(slot: ServiceSlot) {

@@ -7,7 +7,7 @@
 
 本文记录 Nya 核心运行时的目标设计。状态为 Proposed 表示它可以指导讨论和实现，但不能单独证明某项能力已经存在；当前可观察行为以源码、导出类型、测试和[核心概念指南](./concepts.md)为证据。某段设计被接受后，实现、测试和公开 API 应逐步与其语义一致。
 
-当前已落地 Component、Context、Fiber、Effect、Registry、Service、Inject、Event 和同步 Config 生命周期。本文中的服务隔离、Context 拦截、调用方追踪、Logger、Loader 和 HMR 仍是 Proposed，不应从目标设计推断它们已经可用。
+当前已落地 Component、Context、Fiber、Effect、Registry、最小 Service 基类、Inject、严格服务隔离、Event 和同步 Config 生命周期。本文中的 Context 拦截、调用方追踪、高级 Service 协议、Logger、Loader 和 HMR 仍是 Proposed，不应从目标设计推断它们已经可用。
 
 Nya 借鉴 Cordis 的设计思想，但不以逐文件复制 Cordis 为目标。第一阶段追求的是复现它最重要的运行语义：上下文作用域、动态服务依赖、组件生命周期和副作用回收。
 
@@ -499,7 +499,9 @@ Fiber 启动时应保存服务实现快照。组件运行期间读取 `ctx.datab
 
 ### 9.4 Service 基类
 
-Nya 可以提供 Cordis 风格的 `Service` 基类，用于把类实例注册为服务：
+> 实施状态：部分 Current。最小基类、`Service.init` 和 `Service.check` 已实现；其余高级协议仍是 Proposed。
+
+Nya 提供 Cordis 风格的 `Service` 基类，用于把类实例注册为服务：
 
 ```ts
 class DatabaseService extends Service {
@@ -513,19 +515,22 @@ class DatabaseService extends Service {
 }
 ```
 
-`Service` 应通过 Symbol 暴露框架协议，例如：
+`Service` 通过 Symbol 暴露框架协议。其中当前已经实现：
 
 - `Service.init`：依赖满足后的初始化；
 - `Service.check`：判断服务当前是否可用；
+
+后续高级协议包括：
+
 - `Service.config`：服务拦截配置类型；
 - `Service.invoke`：把服务实例变成可调用对象；
 - `Service.extend`：创建保留服务上下文的派生对象。
 
-这些协议属于高级能力，可以在基础对象组件、Effect 和服务依赖稳定后实现。
+callable Service、派生对象和 mixin 必须复用后续的调用方 Context 绑定机制，不能通过临时修改原 Service 实例的 Context 实现。
 
 ## 10. 服务隔离与拦截
 
-> 实施状态：Proposed。当前 Core 尚未实现本节的隔离、拦截和调用方追踪。
+> 实施状态：部分 Current。服务寻址隔离已实现；拦截、调用方追踪及隔离事件过滤仍是 Proposed。
 
 ### 10.1 隔离
 
@@ -542,10 +547,13 @@ testContext.provide('database', testDatabase)
 服务名称 + 隔离标签 = 服务实现键
 ```
 
-- 未隔离的上下文共享根标签。
+- 未隔离的上下文共享 Root 内部为该服务名维护的默认标签。
+- 服务名必须是非空字符串，显式标签必须是 Symbol。
 - 未传入标签时创建新的唯一标签。
-- 多个 Context 使用同一个标签时共享同一服务实现。
-- 服务依赖和相关事件过滤都必须遵守隔离标签。
+- 多个 Context 在同一 Root 中使用同一个标签时共享同一服务实现；不同 Root 始终隔离。
+- 隔离严格匹配，缺失实现时消费者保持 `PENDING`，不得回退默认服务。
+- `isolate()` 返回派生 Context，不修改父 Context、不创建 Fiber，也不形成独立生命周期边界。
+- 服务依赖已经遵守隔离标签；相关事件过滤仍须在调用方 Context 追踪实现后遵守同一标签。
 
 ### 10.2 拦截
 
@@ -813,14 +821,18 @@ create-nya           项目脚手架
 
 ### 阶段四：空间组合
 
-> 实施状态：Proposed。
+> 实施状态：部分 Current。服务隔离和最小 Service 基类已完成，其余能力仍是 Proposed。
 
-实现：
+已实现：
 
 - 服务隔离；
+- 最小 Service 基类、`Service.init` 与 `Service.check`。
+
+尚未实现：
+
 - Context 拦截；
 - 服务调用方追踪；
-- Service 基类和 mixin。
+- callable Service、高级 Service 协议和 mixin。
 
 ### 阶段五：外围生态
 
@@ -860,6 +872,9 @@ create-nya           项目脚手架
 - 服务 ACTIVE 后消费者才启动。
 - 服务移除后消费者停止。
 - 服务更换后消费者先清理再重启。
+- 默认实现与隔离实现不能互相满足依赖。
+- 使用同一显式标签的 Context 分支共享服务地址。
+- 不同 Root 即使复用同一 Symbol 也保持隔离。
 - 同一隔离标签不能重复提供同名服务。
 
 ### Event
@@ -878,12 +893,14 @@ create-nya           项目脚手架
 - 根 Context 初始化 Fiber、Registry、ServiceRegistry 和 EventRegistry；
 - Context Proxy 提供已声明服务的属性访问；
 - Component、Fiber、Effect、Service、Inject 和 Event 已接入同一套所有权与动态依赖生命周期；
+- 服务名与隔离标签共同定位服务 slot，隔离缺失时严格保持 PENDING；
+- 最小 Service 基类、`Service.init` 和 `Service.check` 已实现；
 - Standard Schema 同步校验、`fiber.update()`、`restart()` 和快速配置更新收敛已实现。
 
 当前与本文目标之间的主要差距是：
 
-- 服务隔离标签、Context 拦截和服务调用方 Context 追踪；
-- Service 基类、callable Service 和 mixin；
+- Context 拦截、服务调用方 Context 追踪和隔离事件过滤；
+- callable Service、高级 Service 协议和 mixin；
 - Logger、结构化错误上报和 Effect 树诊断；
 - Loader、Include、Group、Timer 和 HMR 等外围生态。
 

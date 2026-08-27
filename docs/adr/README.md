@@ -16,6 +16,8 @@ Accepted ADR 不应通过改写历史来适配新结论。需要改变决策时�
 | 编号 | 标题 | 状态 |
 | --- | --- | --- |
 | [0001](./0001-repository-documentation.md) | 文档采用仓库内可验证的 Docs-as-Code 模式 | Accepted |
+| [0002](./0002-config-lifecycle.md) | 配置生命周期与 Fiber 串行协调 | Accepted |
+| [0003](./0003-service-isolation.md) | 服务身份由名称与隔离标签共同确定 | Accepted |
 
 ## 新建 ADR
 

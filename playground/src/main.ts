@@ -2,6 +2,8 @@
 
 import { runLifecycleScenario } from './scenarios/lifecycle.ts'
 import { runGreetingScenario } from './scenarios/greeting.ts'
+import { runServiceIsolationScenario } from './scenarios/service-isolation.ts'
 
 await runLifecycleScenario()
 await runGreetingScenario()
+await runServiceIsolationScenario()
