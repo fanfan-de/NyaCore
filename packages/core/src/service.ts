@@ -10,6 +10,7 @@ import {
   contextFilter,
   contextIsolations,
   fiberGetServiceImplementation,
+  fiberGetServiceSource,
   serviceCapture,
   serviceCheck,
   serviceContextFilter,
@@ -53,6 +54,22 @@ interface ServiceCallFrame {
   readonly implementation: ServiceImplementation<Service>
 }
 
+/** Service 方法解析依赖时固定使用的 Provider run。Root 是实时来源。 */
+interface ServiceDependencySource {
+  readonly context: Context
+  readonly snapshot: DependencySnapshot | undefined
+  readonly run: number | undefined
+}
+
+/** 不暴露到公共实现对象上的调用绑定与跨 Fiber 生命周期状态。 */
+interface ServiceImplementationState {
+  readonly source: ServiceDependencySource
+  valid: boolean
+  sourceInvalidating: boolean
+  ownerDisposing: boolean
+  detachSource?: Disposer
+}
+
 const serviceCallFrames = new WeakMap<Context, ServiceCallFrame>()
 const serviceFacades = new WeakMap<
   ServiceImplementation,
@@ -61,6 +78,10 @@ const serviceFacades = new WeakMap<
 const serviceFacadeImplementations = new WeakMap<
   Service,
   ServiceImplementation<Service>
+>()
+const serviceImplementationStates = new WeakMap<
+  ServiceImplementation,
+  ServiceImplementationState
 >()
 
 /** Context.extend() 保留 provider 来源，并把派生 Context 推进为新的 caller 视图。 */
@@ -242,27 +263,80 @@ export class ServiceRegistry {
     return slot
   }
 
-  /** 解开嵌套 Service 调用 Context，找到最终负责依赖权限与快照的 Context。 */
-  #getDependencyContext(
-    context: Context,
-    seen = new Set<Context>(),
-  ): Context {
+  /** 把嵌套 Service 调用归一化为创建最外层实现时固定的 Provider run。 */
+  #getDependencySource(context: Context): ServiceDependencySource {
     const frame = serviceCallFrames.get(context)
-    if (!frame) return context
-    if (seen.has(context)) {
-      throw new Error('cyclic Service provider Context')
+    if (frame) {
+      const state = serviceImplementationStates.get(frame.implementation)
+      if (!state) throw new Error('invalid Service call frame')
+      return state.source
     }
 
-    seen.add(context)
-    return this.#getDependencyContext(frame.providerContext, seen)
+    if (context.fiber.isRoot) {
+      return { context, snapshot: undefined, run: undefined }
+    }
+
+    const source = context.fiber[fiberGetServiceSource]()
+    if (source.run === undefined || source.snapshot === undefined) {
+      throw new Error('inactive Service provider Context')
+    }
+    return { context, ...source }
+  }
+
+  /** Provider run 是否仍是创建实现时的同一轮运行。 */
+  #isSourceCurrent(source: ServiceDependencySource, loading = false) {
+    const fiber = source.context.fiber
+    if (fiber.isRoot) return fiber.state === FiberState.ACTIVE
+    if (
+      fiber.state !== FiberState.ACTIVE
+      && (!loading || fiber.state !== FiberState.LOADING)
+    ) {
+      return false
+    }
+
+    const current = fiber[fiberGetServiceSource]()
+    return current.run === source.run
+      && current.snapshot === source.snapshot
+  }
+
+  /** 普通消费者与 Root 实时读取只能观察仍有效的实现。 */
+  #isImplementationAvailable(implementation: ServiceImplementation) {
+    if (implementation.owner.state !== FiberState.ACTIVE) return false
+    const state = serviceImplementationStates.get(implementation)
+    return !!state?.valid && this.#isSourceCurrent(state.source)
+  }
+
+  /** 来源 Provider 清理时先让跨所有者实现失效，并等待其消费者卸载。 */
+  async #invalidateFromSource(
+    slot: ServiceSlot,
+    implementation: ServiceImplementation,
+    state: ServiceImplementationState,
+  ) {
+    if (
+      state.ownerDisposing
+      || state.sourceInvalidating
+      || !state.valid
+    ) {
+      return
+    }
+
+    state.sourceInvalidating = true
+    state.valid = false
+    if (slot.implementation !== implementation) return
+
+    const consumers = this.#notify(slot)
+    await Promise.allSettled(
+      consumers.map(fiber => fiber.awaitStable()),
+    )
   }
 
   /** 当前 Context 的服务地址是否已经被依赖声明或服务注册认识。 */
   has(context: Context, name: string) {
     const frame = serviceCallFrames.get(context)
     const source = frame
-      ? this.#getDependencyContext(frame.providerContext)
+      ? serviceImplementationStates.get(frame.implementation)?.source.context
       : context
+    if (!source) throw new Error('invalid Service call frame')
     const address = this.#resolveAddress(source, name)
     return this.#slots.get(name)?.has(address.label) ?? false
   }
@@ -301,6 +375,30 @@ export class ServiceRegistry {
         owner: context.fiber,
         check,
       }
+      const source = this.#getDependencySource(context)
+      if (!this.#isSourceCurrent(source, true)) {
+        throw new Error('inactive Service provider Context')
+      }
+      const state: ServiceImplementationState = {
+        source,
+        valid: true,
+        sourceInvalidating: false,
+        ownerDisposing: false,
+      }
+      serviceImplementationStates.set(implementation, state)
+
+      // 资源仍由调用方 Fiber 拥有；来源 Fiber 只登记一条失效边，确保其
+      // Provider run 清理前先让依赖该实现的消费者完成卸载。
+      if (source.context.fiber !== context.fiber) {
+        state.detachSource = source.context.fiber.effect(
+          () => () => this.#invalidateFromSource(
+            slot,
+            implementation,
+            state,
+          ),
+          `service source(${JSON.stringify(name)})`,
+        )
+      }
 
       slot.implementation = implementation
       let owned = this.#owned.get(context.fiber)
@@ -317,6 +415,12 @@ export class ServiceRegistry {
       }
 
       return async () => {
+        state.ownerDisposing = true
+        // owner 主动清理时先撤销来源失效边。回调看到 ownerDisposing 后
+        // 直接返回；来源清理已经开始时则不能反向等待自己，避免循环等待。
+        if (!state.sourceInvalidating) await state.detachSource?.()
+        state.valid = false
+
         // 只允许创建本实现的 disposer 删除本实现，避免旧 disposer 误删后继值。
         if (slot.implementation !== implementation) return
 
@@ -342,7 +446,7 @@ export class ServiceRegistry {
     for (const name of inject) {
       const implementation = this.#getSlot(context, name).implementation
 
-      if (!implementation || implementation.owner.state !== FiberState.ACTIVE) {
+      if (!implementation || !this.#isImplementationAvailable(implementation)) {
         return
       }
 
@@ -412,16 +516,24 @@ export class ServiceRegistry {
   get(context: Context, name: string): unknown {
     const frame = serviceCallFrames.get(context)
     if (frame) {
-      const provider = this.#getDependencyContext(frame.providerContext)
+      const state = serviceImplementationStates.get(frame.implementation)
+      if (!state) throw new Error('invalid Service call frame')
+      const source = state.source
       let implementation: ServiceImplementation | undefined
 
-      if (provider.fiber.isRoot) {
-        implementation = this.#getSlot(provider, name).implementation
-        if (implementation?.owner.state !== FiberState.ACTIVE) return
+      if (source.context.fiber.isRoot) {
+        implementation = this.#getSlot(source.context, name).implementation
+        if (
+          implementation
+          && !this.#isImplementationAvailable(implementation)
+        ) {
+          return
+        }
       } else {
-        implementation = provider.fiber[fiberGetServiceImplementation](
+        implementation = source.context.fiber[fiberGetServiceImplementation](
           name,
-          this.#resolveAddress(provider, name),
+          this.#resolveAddress(source.context, name),
+          source.snapshot,
         )
       }
 
@@ -433,19 +545,31 @@ export class ServiceRegistry {
     const slot = this.#getSlot(context, name)
     const implementation = slot.implementation
 
-    // 提供方在自己的构造、初始化和清理代码中可以访问自己刚提供的服务。
-    if (implementation?.providerContext === context) {
-      return implementation.value
-    }
-
-    if (context.fiber.isRoot) {
-      if (implementation?.owner.state !== FiberState.ACTIVE) return
+    // 同一 Provider Fiber 可以在构造、初始化和清理期间读取自己的服务。
+    // 精确提供 Context 复用原实例，其他派生 Context 仍获得独立 caller facade。
+    if (implementation?.owner === context.fiber) {
+      if (implementation.providerContext === context) {
+        return implementation.value
+      }
+      if (!serviceImplementationStates.get(implementation)?.valid) return
       return bindServiceImplementation(context, implementation)
     }
 
+    if (context.fiber.isRoot) {
+      if (!implementation || !this.#isImplementationAvailable(implementation)) {
+        return
+      }
+      return bindServiceImplementation(context, implementation)
+    }
+
+    const { snapshot } = context.fiber[fiberGetServiceSource]()
     return bindServiceImplementation(
       context,
-      context.fiber[fiberGetServiceImplementation](name, slot.address),
+      context.fiber[fiberGetServiceImplementation](
+        name,
+        slot.address,
+        snapshot,
+      ),
     )
   }
 

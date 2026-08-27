@@ -325,6 +325,8 @@ describe('Service caller tracking', () => {
     expect(observations).toEqual([[1, 99], [2, 99]])
     expect(activeFacades).toHaveLength(2)
     expect(activeFacades[1]).not.toBe(activeFacades[0])
+    expect(activeFacades[0].backendId()).toBe(1)
+    expect(activeFacades[1].backendId()).toBe(2)
     expect(provider.state).toBe(FiberState.ACTIVE)
     expect(consumer.state).toBe(FiberState.ACTIVE)
 
@@ -557,6 +559,106 @@ describe('Service caller tracking', () => {
       removeCreatingDependency(),
       removeProviderDependency(),
     ])
+  })
+
+  it('invalidates cross-owner Services before their source Provider cleans up', async () => {
+    const app = new Context()
+    const events: string[] = []
+
+    interface Dependency {
+      id: number
+    }
+
+    class InnerService extends Service {
+      static provide = 'callerSourceInner'
+
+      dependencyId() {
+        return read<Dependency>(this.ctx, 'callerSourceDependency').id
+      }
+    }
+
+    class OuterService extends Service {
+      static provide = 'callerSourceOuter'
+      static inject = ['callerSourceDependency']
+
+      createInner() {
+        return new InnerService(this.ctx)
+      }
+
+      [Service.init]() {
+        return () => events.push('outer:stop')
+      }
+    }
+
+    const removeDependency = app.provide(
+      'callerSourceDependency',
+      { id: 1 },
+    )
+    const outerProvider = app.installComponent(OuterService)
+    await outerProvider
+
+    const inner = read<OuterService>(app, 'callerSourceOuter').createInner()
+    expect(inner.dependencyId()).toBe(1)
+
+    const consumer = app.inject(['callerSourceInner'], (context) => {
+      const facade = read<InnerService>(context, 'callerSourceInner')
+      expect(facade.dependencyId()).toBe(1)
+      return () => {
+        events.push(`inner:stop:${facade.dependencyId()}`)
+      }
+    })
+    await consumer
+    expect(consumer.state).toBe(FiberState.ACTIVE)
+
+    await removeDependency()
+
+    expect(outerProvider.state).toBe(FiberState.PENDING)
+    expect(consumer.state).toBe(FiberState.PENDING)
+    expect(events).toEqual(['inner:stop:1', 'outer:stop'])
+    expect(app.get('callerSourceInner')).toBeUndefined()
+
+    await consumer.dispose()
+    await outerProvider.dispose()
+    await app.fiber.restart()
+  })
+
+  it('returns a facade for another Context on the Provider Fiber', async () => {
+    const app = new Context()
+    const marker = {}
+    let raw!: SelfService
+    let exact!: SelfService
+    let derived!: SelfService
+    let derivedContext!: Context
+
+    class SelfService extends Service {
+      static provide = 'callerProviderSelf'
+
+      constructor(context: Context) {
+        super(context)
+        raw = this
+        exact = read<SelfService>(context, 'callerProviderSelf')
+        derivedContext = context.extend({ marker })
+        derived = read<SelfService>(derivedContext, 'callerProviderSelf')
+      }
+
+      caller() {
+        return this.ctx
+      }
+    }
+
+    const provider = app.installComponent(SelfService)
+    await provider
+
+    expect(exact).toBe(raw)
+    expect(derived).not.toBe(raw)
+    expect(derived).toBeInstanceOf(SelfService)
+    expect(read<SelfService>(derivedContext, 'callerProviderSelf'))
+      .toBe(derived)
+    expect(derived.caller().fiber).toBe(provider)
+    expect((derived.caller() as Context & { marker: object }).marker)
+      .toBe(marker)
+
+    await provider.dispose()
   })
 
   it('carries the original caller from one Service into another', async () => {
