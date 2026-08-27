@@ -5,7 +5,8 @@ Nya 是一个以动态服务依赖驱动、能够追踪并完整撤销组件副�
 ## 当前状态
 
 - 核心组件、Context、Fiber、Effect、Service 与 Inject 已有实现和测试。
-- Event 注册、生命周期清理、作用域过滤和多模式派发已有实现和测试；配置 Schema、服务隔离、拦截和热重载仍属于后续设计目标。
+- Event 注册、生命周期清理、作用域过滤和多模式派发已有实现和测试。
+- Standard Schema 同步配置校验、`fiber.update()` 和 `restart()` 已实现；服务隔离、拦截、Logger、Loader 和 HMR 仍属于后续设计目标。
 - 公共 API 尚未稳定，不应假设当前行为已经遵循语义化版本兼容承诺。
 
 ## 仓库结构

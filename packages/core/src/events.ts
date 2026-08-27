@@ -2,6 +2,7 @@
 
 import type { Context } from './context.js'
 import type { Disposer } from './disposable.js'
+import type { Fiber } from './fiber.js'
 import { FiberState } from './fiber.js'
 import { contextFilter } from './symbols.js'
 
@@ -17,7 +18,14 @@ import { contextFilter } from './symbols.js'
  * }
  * ```
  */
-export interface Events {}
+export interface Events {
+  /** 配置更新在提交前经过的内部可拦截调用链。 */
+  'internal/update'(
+    this: Fiber,
+    config: unknown,
+    next: () => void | Promise<void>,
+  ): void | Promise<void>
+}
 
 export type DispatchMode =
   | 'emit'

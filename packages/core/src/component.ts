@@ -2,6 +2,7 @@
 
 import type { Context } from './context.js'
 import type { CleanupSource } from './disposable.js'
+import type { StandardSchemaV1 } from '@standard-schema/spec'
 
 /** 组件需要的服务；对象形式当前同样只读取键。 */
 export type Inject =
@@ -47,23 +48,24 @@ export type Component<Config = unknown> =
 
 export namespace Component {
   /** 三种 Component 形式共享的静态元数据。 */
-  export interface Base {
+  export interface Base<Config = unknown> {
     name?: string
     inject?: Inject
+    Config?: StandardSchemaV1<unknown, Config>
   }
 
   /** 直接调用的函数 Component。 */
-  export interface Function<Config = unknown> extends Base {
+  export interface Function<Config = unknown> extends Base<Config> {
     (context: Context, config: Config): CleanupSource
   }
 
   /** 通过 `new` 启动的 class / 构造器 Component。 */
-  export interface Constructor<Config = unknown> extends Base {
+  export interface Constructor<Config = unknown> extends Base<Config> {
     new (context: Context, config: Config): any
   }
 
   /** 通过 `apply` 方法启动的对象 Component。 */
-  export interface Object<Config = unknown> extends Base {
+  export interface Object<Config = unknown> extends Base<Config> {
     apply: Function<Config>
   }
 
@@ -91,6 +93,7 @@ export interface ResolvedComponent {
   kind: Component.Kind
   callback: Component.Callback<any>
   inject: ResolvedInject
+  Config?: StandardSchemaV1<unknown, any>
 }
 
 const GeneratorFunction = function* () {}.constructor
@@ -145,5 +148,6 @@ export function resolveComponent(
     kind: isConstructor(callback) ? 'constructor' : 'function',
     name,
     inject: resolveInject(component.inject),
+    Config: component.Config,
   }
 }

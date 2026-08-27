@@ -7,6 +7,7 @@ import type { Component, ResolvedInject } from './component.js'
 import type { ComponentRuntime } from './registry.js'
 import type { DependencySnapshot } from './service.js'
 import { serviceInit } from './symbols.js'
+import { resolveConfig } from './config.js'
 
 export enum FiberState {
   /** 组件实例存在，但当前缺少必需依赖。 */
@@ -17,7 +18,7 @@ export enum FiberState {
   ACTIVE = 'ACTIVE',
   /** 正在撤销当前一轮运行产生的全部 Effect。 */
   UNLOADING = 'UNLOADING',
-  /** 当前依赖 epoch 的组件启动失败。 */
+  /** 当前配置与依赖目标的校验或组件启动失败。 */
   FAILED = 'FAILED',
   /** 组件实例已永久销毁，不会再因服务变化而启动。 */
   DISPOSED = 'DISPOSED',
@@ -35,7 +36,13 @@ export class Fiber implements PromiseLike<void> {
   // ---------- 组件实例与安装输入 ----------
 
   #runtime: ComponentRuntime | null
+  #configInput: unknown
   #config: unknown
+  #hasConfigError = false
+  #configError: unknown
+  #configVersion = 0
+  #updateRequest = 0
+  #latestUpdateOperation: Promise<void> = Promise.resolve()
   #detach: (() => void) | undefined
 
   /** start() 后建立、最终 dispose() 时撤销的服务依赖反向订阅。 */
@@ -52,8 +59,11 @@ export class Fiber implements PromiseLike<void> {
   /** 组件入口和清理代码当前固定使用的快照。 */
   #activeSnapshot: DependencySnapshot | undefined
 
-  /** 同一 epoch 启动失败后不自动空转重试；依赖 epoch 改变后才重新尝试。 */
-  #failedEpoch: string | undefined
+  /** 当前运行固定使用的配置版本；入口闭包持有对应的配置值。 */
+  #activeConfigVersion: number | undefined
+
+  /** 同一服务与配置目标启动失败后不空转重试；目标变化后才重新尝试。 */
+  #failedTarget: string | undefined
 
   #currentScope: EffectScope | undefined
   #startupScopes: EffectScope[] | undefined
@@ -77,7 +87,7 @@ export class Fiber implements PromiseLike<void> {
     this.parent = options.parent
     this.#runtime = options.runtime
     this.inject = options.inject ?? new Set()
-    this.#config = options.config
+    this.#configInput = options.config
     this.#detach = options.detach
     this.state = options.runtime ? FiberState.PENDING : FiberState.ACTIVE
 
@@ -109,6 +119,11 @@ export class Fiber implements PromiseLike<void> {
     return this.#runtime === null
   }
 
+  /** 当前已经通过 Schema 校验和转换的目标配置。 */
+  get config(): unknown {
+    return this.#config
+  }
+
   /** Effect 和子组件只能在根、LOADING 或 ACTIVE 的运行上下文中创建。 */
   assertActive() {
     if (this.state !== FiberState.ACTIVE && this.state !== FiberState.LOADING) {
@@ -124,6 +139,14 @@ export class Fiber implements PromiseLike<void> {
     if (this.isRoot || this.#unsubscribe || this.#disposeOperation) return this
 
     this.#unsubscribe = this.context.root.services.subscribe(this, this.inject)
+    try {
+      this.#config = resolveConfig(this.#runtime?.Config, this.#configInput)
+      this.#configInput = undefined
+    } catch (error) {
+      this.#hasConfigError = true
+      this.#configError = error
+      this.error = error
+    }
     this.refreshDependencies()
     return this
   }
@@ -190,6 +213,77 @@ export class Fiber implements PromiseLike<void> {
     return scope.dispose
   }
 
+  /** 校验并提交新配置，经内部 waterfall 扩展点后等待运行稳定。 */
+  async update(config: unknown): Promise<void> {
+    if (this.isRoot) {
+      throw new Error('cannot update root fiber')
+    }
+    this.#assertReusable()
+
+    const resolved = resolveConfig(this.#runtime?.Config, config)
+    const request = ++this.#updateRequest
+    const operation = (async () => {
+      // 让同一调用栈内的连续 update() 先登记请求序号，再进入扩展链。
+      await Promise.resolve()
+      let commitOperation: Promise<void> | undefined
+      await this.context.waterfall(
+        this,
+        'internal/update',
+        resolved,
+        () => {
+          return commitOperation ??= this.#commitConfig(resolved, request)
+        },
+      )
+      // 即使同步监听器调用 next() 时没有 return / await，update() 仍等待
+      // 已经进入默认终点的配置完成生命周期收敛。
+      await commitOperation
+    })()
+    this.#latestUpdateOperation = operation
+    await operation
+
+    // 较早的 update() 也要等调用期间出现的最新请求完成，但不继承
+    // 后继请求自己的扩展链错误；该错误只由对应的 update() 暴露。
+    while (operation !== this.#latestUpdateOperation) {
+      const latest = this.#latestUpdateOperation
+      await latest.catch(() => {})
+      if (latest === this.#latestUpdateOperation) break
+    }
+    await this.awaitStable()
+  }
+
+  /** 使用当前配置重新建立运行；根 Fiber 则清空整棵 Effect 树。 */
+  async restart(): Promise<void> {
+    if (this.isRoot) {
+      await this.dispose()
+      return
+    }
+    this.#assertReusable()
+
+    if (this.#hasConfigError) {
+      try {
+        this.#config = resolveConfig(
+          this.#runtime?.Config,
+          this.#configInput,
+        )
+        this.#configInput = undefined
+        this.#hasConfigError = false
+        this.#configError = undefined
+      } catch (error) {
+        this.#configError = error
+        this.error = error
+        this.#scheduleReconcile()
+        await this.awaitStable()
+        return
+      }
+    }
+
+    this.#configVersion++
+    this.#failedTarget = undefined
+    this.error = undefined
+    this.#scheduleReconcile()
+    await this.awaitStable()
+  }
+
   /** 永久销毁 Fiber；与依赖失效导致的临时 unload 不同。 */
   dispose(): Promise<void> {
     if (this.#disposeOperation) return this.#disposeOperation
@@ -249,64 +343,105 @@ export class Fiber implements PromiseLike<void> {
   #isSettled() {
     if (this.#disposeOperation || this.state === FiberState.DISPOSED) return true
 
+    if (this.#hasConfigError) return this.state === FiberState.FAILED
+
     const desired = this.#desiredSnapshot
     if (!desired) {
       return !this.#activeSnapshot && this.state === FiberState.PENDING
     }
 
     if (
-      this.#failedEpoch === desired.epoch
+      this.#failedTarget === this.#getTarget(desired)
       && this.state === FiberState.FAILED
     ) {
       return true
     }
 
     return this.#activeSnapshot?.epoch === desired.epoch
+      && this.#activeConfigVersion === this.#configVersion
       && this.state === FiberState.ACTIVE
   }
 
   /** 收敛到最新快照：旧运行必须先卸载，缺依赖时停在 PENDING。 */
   async #reconcile() {
     while (!this.#disposeOperation) {
+      if (this.#hasConfigError) {
+        this.error = this.#configError
+        this.#setState(FiberState.FAILED)
+        throw this.#configError
+      }
+
       const desired = this.#desiredSnapshot
       const active = this.#activeSnapshot
 
-      if (active && active.epoch !== desired?.epoch) {
-        await this.#unloadRun()
+      if (
+        active
+        && (
+          active.epoch !== desired?.epoch
+          || this.#activeConfigVersion !== this.#configVersion
+        )
+      ) {
+        try {
+          await this.#unloadRun()
+        } catch (error) {
+          this.#failCleanup(error)
+          throw error
+        }
         continue
       }
 
       if (!desired) {
-        this.#failedEpoch = undefined
+        this.#failedTarget = undefined
         this.error = undefined
         this.#setState(FiberState.PENDING)
         return
       }
 
-      if (active?.epoch === desired.epoch) return
+      if (
+        active?.epoch === desired.epoch
+        && this.#activeConfigVersion === this.#configVersion
+      ) return
 
-      if (this.#failedEpoch === desired.epoch) {
+      const target = this.#getTarget(desired)
+      if (this.#failedTarget === target) {
         this.#setState(FiberState.FAILED)
         return
       }
 
-      await this.#startRun(desired)
+      try {
+        await this.#startRun(
+          desired,
+          this.#configVersion,
+          this.#config,
+        )
+      } catch (error) {
+        // 过期启动在内部卸载时也可能清理失败；此时不能静默启动新目标。
+        if (!this.#disposeOperation && this.state !== FiberState.FAILED) {
+          this.#failCleanup(error)
+        }
+        throw error
+      }
     }
   }
 
-  async #startRun(snapshot: DependencySnapshot) {
+  async #startRun(
+    snapshot: DependencySnapshot,
+    configVersion: number,
+    config: unknown,
+  ) {
     const runtime = this.#runtime
     if (!runtime || this.#disposeOperation) return
 
     this.#runEffects = new DisposableStack()
     this.#activeSnapshot = snapshot
+    this.#activeConfigVersion = configVersion
     this.#setState(FiberState.LOADING)
     this.error = undefined
     this.#startupScopes = []
 
     try {
       this.effect(
-        () => this.#invoke(runtime),
+        () => this.#invoke(runtime, config),
         `ctx.installComponent(${JSON.stringify(runtime.name ?? 'anonymous')})`,
       )
 
@@ -328,7 +463,8 @@ export class Fiber implements PromiseLike<void> {
 
       this.#runEffects = undefined
       this.#activeSnapshot = undefined
-      this.#failedEpoch = snapshot.epoch
+      this.#activeConfigVersion = undefined
+      this.#failedTarget = this.#getTarget(snapshot, configVersion)
       this.#setState(FiberState.FAILED)
       throw failure
     } finally {
@@ -340,12 +476,13 @@ export class Fiber implements PromiseLike<void> {
     if (
       this.#disposeOperation
       || this.#desiredSnapshot?.epoch !== snapshot.epoch
+      || this.#configVersion !== configVersion
     ) {
       await this.#unloadRun()
       return
     }
 
-    this.#failedEpoch = undefined
+    this.#failedTarget = undefined
     this.#setState(FiberState.ACTIVE)
   }
 
@@ -362,6 +499,7 @@ export class Fiber implements PromiseLike<void> {
       // 清理函数执行期间仍能读取旧 snapshot；全部清理结束后才解除固定。
       this.#runEffects = undefined
       this.#activeSnapshot = undefined
+      this.#activeConfigVersion = undefined
       if (!this.#disposeOperation) this.#setState(FiberState.PENDING)
     }
   }
@@ -377,7 +515,7 @@ export class Fiber implements PromiseLike<void> {
       this.#unsubscribe?.()
       this.#unsubscribe = undefined
       this.#desiredSnapshot = undefined
-      this.#failedEpoch = undefined
+      this.#failedTarget = undefined
 
       this.#detach?.()
       this.#detach = undefined
@@ -394,14 +532,14 @@ export class Fiber implements PromiseLike<void> {
     }
   }
 
-  #invoke(runtime: ComponentRuntime): CleanupSource {
+  #invoke(runtime: ComponentRuntime, config: unknown): CleanupSource {
     if (runtime.kind === 'function') {
       const apply = runtime.callback as Component.Function<any>
-      return apply(this.context, this.#config)
+      return apply(this.context, config)
     }
 
     const Constructor = runtime.callback as Component.Constructor<any>
-    const instance = new Constructor(this.context, this.#config)
+    const instance = new Constructor(this.context, config)
     const init = Reflect.get(instance, serviceInit)
     if (typeof init === 'function') {
       return Reflect.apply(init, instance, []) as CleanupSource
@@ -414,5 +552,45 @@ export class Fiber implements PromiseLike<void> {
 
     this.state = state
     this.context.root.services.onFiberStateChange(this, oldState, state)
+  }
+
+  #assertReusable() {
+    if (this.#disposeOperation || this.state === FiberState.DISPOSED) {
+      throw new Error('cannot update disposed fiber')
+    }
+  }
+
+  #failCleanup(error: unknown) {
+    this.error = error
+    const desired = this.#desiredSnapshot
+    if (desired) {
+      this.#failedTarget = this.#getTarget(desired)
+      this.#setState(FiberState.FAILED)
+    } else {
+      this.#failedTarget = undefined
+      this.#setState(FiberState.PENDING)
+    }
+  }
+
+  async #commitConfig(config: unknown, request: number) {
+    this.#assertReusable()
+    if (request !== this.#updateRequest) return
+
+    this.#config = config
+    this.#configInput = undefined
+    this.#hasConfigError = false
+    this.#configError = undefined
+    this.#configVersion++
+    this.#failedTarget = undefined
+    this.error = undefined
+    this.#scheduleReconcile()
+    await this.awaitStable()
+  }
+
+  #getTarget(
+    snapshot: DependencySnapshot,
+    configVersion = this.#configVersion,
+  ) {
+    return `${snapshot.epoch}:${configVersion}`
   }
 }

@@ -7,6 +7,8 @@
 
 本文记录 Nya 核心运行时的目标设计。状态为 Proposed 表示它可以指导讨论和实现，但不能单独证明某项能力已经存在；当前可观察行为以源码、导出类型、测试和[核心概念指南](./concepts.md)为证据。某段设计被接受后，实现、测试和公开 API 应逐步与其语义一致。
 
+当前已落地 Component、Context、Fiber、Effect、Registry、Service、Inject、Event 和同步 Config 生命周期。本文中的服务隔离、Context 拦截、调用方追踪、Logger、Loader 和 HMR 仍是 Proposed，不应从目标设计推断它们已经可用。
+
 Nya 借鉴 Cordis 的设计思想，但不以逐文件复制 Cordis 为目标。第一阶段追求的是复现它最重要的运行语义：上下文作用域、动态服务依赖、组件生命周期和副作用回收。
 
 ## 1. 要解决的问题
@@ -521,6 +523,8 @@ class DatabaseService extends Service {
 
 ## 10. 服务隔离与拦截
 
+> 实施状态：Proposed。当前 Core 尚未实现本节的隔离、拦截和调用方追踪。
+
 ### 10.1 隔离
 
 `ctx.isolate(name, label?)` 为某个服务名称创建局部解析空间：
@@ -619,6 +623,8 @@ Nya 沿用 Cordis 的多种派发模式：
 
 ## 13. Config
 
+> 实施状态：Current。同步 Standard Schema 校验、配置更新与 Fiber 重启已实现；Loader 整合仍是 Proposed。
+
 组件可以提供符合 Standard Schema 的 `Config`：
 
 ```ts
@@ -634,15 +640,20 @@ const component = {
 
 - 配置在组件入口执行前校验。
 - 校验结果可以填充默认值或转换数据。
-- 第一版只接受同步校验结果。
-- 校验失败时 Fiber 进入 FAILED，入口不得执行。
-- `fiber.update(config)` 必须先校验新配置。
-- 配置更新通过内部 waterfall 事件提供扩展机会。
-- 更新生效时必须先清理旧运行，再使用新配置启动。
+- 未声明 Schema 时原样使用输入；当前只接受同步校验结果，Promise 结果会被明确拒绝。
+- 校验 issue 使用导出的 `ValidationError` 暴露；初始校验失败时 Fiber 进入 FAILED，入口不得执行。
+- `fiber.config` 暴露已校验、已转换的目标配置。
+- `fiber.update(config)` 先校验新配置，失败时不修改旧配置和当前运行。
+- 合法配置通过以 Fiber 为 `this` 的 `internal/update` waterfall 提供扩展机会。
+- 更新生效时必须先清理旧运行，再使用新配置启动；多次快速更新最终收敛到最新配置。
+- `fiber.restart()` 使用当前已验证配置重启 ACTIVE Fiber，或重试 FAILED Fiber；初始 Schema 失败时重新校验原始输入，也可以通过合法 `update()` 恢复，缺少依赖时保持 PENDING。
+- DISPOSED Fiber 拒绝更新和重启；根 Fiber 仅支持清空 Effect 树并恢复 ACTIVE 的 `restart()`。
 
 Loader 可以在 Core 之外负责读取 YAML 或 JSON、保存修改以及把配置条目映射为 Fiber。
 
 ## 14. 错误处理与日志
+
+> 实施状态：部分 Current。Fiber 的失败隔离、错误暴露和回滚已有实现；Logger、结构化日志和 Effect 树诊断仍是 Proposed。
 
 ### 14.1 组件错误
 
@@ -756,6 +767,8 @@ create-nya           项目脚手架
 
 ### 阶段一：组件实例与清理
 
+> 实施状态：Current。
+
 实现：
 
 - 根 Context；
@@ -769,6 +782,8 @@ create-nya           项目脚手架
 
 ### 阶段二：服务与动态依赖
 
+> 实施状态：Current。
+
 实现：
 
 - `ctx.provide()`；
@@ -781,14 +796,22 @@ create-nya           项目脚手架
 
 ### 阶段三：事件与配置
 
-实现：
+> 实施状态：部分 Current。Event 和配置生命周期已完成；Logger 仍未实现。
+
+已实现：
 
 - `on`、`once` 和各派发模式；
 - Standard Schema 配置校验；
 - `fiber.update()` 和 `restart()`；
-- 错误隔离与日志。
+- Fiber 启动失败隔离、错误暴露与回滚。
+
+尚未实现：
+
+- Logger、结构化日志和 Effect 树诊断。
 
 ### 阶段四：空间组合
+
+> 实施状态：Proposed。
 
 实现：
 
@@ -798,6 +821,8 @@ create-nya           项目脚手架
 - Service 基类和 mixin。
 
 ### 阶段五：外围生态
+
+> 实施状态：Proposed。
 
 实现 Loader、Include、Group、Timer 和 HMR。外围包只能依赖 Core 的公开协议，不得通过修改 Core 私有状态工作。
 
@@ -842,22 +867,25 @@ create-nya           项目脚手架
 - 监听器使用订阅方 Context。
 - 隔离过滤不会把事件发送到错误作用域。
 
-## 20. 当前原型的处理
+## 20. 当前实现与目标设计的衔接
 
-当前 `packages/core/src/context.ts` 已经验证了两个基础想法：
+当前 `packages/core/src/context.ts` 已经不再是只验证原型链的原型。已落地的运行时基础包括：
 
-- 使用 Symbol 标记 Context；
-- 使用原型链派生子 Context。
+- 使用 `@nya/core` 命名空间的全局 Symbol 识别 Context；
+- 使用原型链派生子 Context，并保护 `root`、Fiber、Registry 等核心引用；
+- 根 Context 初始化 Fiber、Registry、ServiceRegistry 和 EventRegistry；
+- Context Proxy 提供已声明服务的属性访问；
+- Component、Fiber、Effect、Service、Inject 和 Event 已接入同一套所有权与动态依赖生命周期；
+- Standard Schema 同步校验、`fiber.update()`、`restart()` 和快速配置更新收敛已实现。
 
-但它还不是本文定义的完整 Context，后续至少需要调整：
+当前与本文目标之间的主要差距是：
 
-- Symbol 名称改为 `@nya/core` 命名空间；
-- 根 Context 初始化 Fiber、Registry、Reflect、Events 和 Logger；
-- Context 构造结果接入 Proxy；
-- `extend()` 与服务调用方追踪机制兼容；
-- 防止局部扩展破坏 `root` 等核心不变量。
+- 服务隔离标签、Context 拦截和服务调用方 Context 追踪；
+- Service 基类、callable Service 和 mixin；
+- Logger、结构化错误上报和 Effect 树诊断；
+- Loader、Include、Group、Timer 和 HMR 等外围生态。
 
-因此下一步不应继续向当前 Context 类直接堆叠服务和事件逻辑，而应先从阶段一的公开行为测试开始，再据此重构它。
+因此，后续应当在已有生命周期协调器上继续完成空间组合和可观测性，而不是从阶段一重新开始。
 
 ## 21. 设计结论
 

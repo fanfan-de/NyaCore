@@ -4,6 +4,7 @@ import type { Context } from './context.js'
 import { Fiber } from './fiber.js'
 import type { Component } from './component.js'
 import { resolveComponent } from './component.js'
+import type { StandardSchemaV1 } from '@standard-schema/spec'
 
 /** 同一个 Component 定义在 Registry 中共享的 Runtime 元数据。 */
 export interface ComponentRuntime {
@@ -11,6 +12,7 @@ export interface ComponentRuntime {
   callback: Component.Callback<any>
   kind: Component.Kind
   fibers: Set<Fiber>
+  Config?: StandardSchemaV1<unknown, any>
 }
 
 export class Registry {
@@ -32,6 +34,7 @@ export class Registry {
         callback: definition.callback,
         kind: definition.kind,
         fibers: new Set(),
+        Config: definition.Config,
       }
       this.#runtimes.set(definition.callback, runtime)
     }

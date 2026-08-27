@@ -7,7 +7,7 @@
 
 本文解释 Nya Core 当前代码中的核心概念、概念之间的关系，以及这些概念在生命周期中的实际行为。它面向第一次阅读代码的开发者，也可以作为编写组件时的心智模型。
 
-本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject、动态依赖和 Event 已经可用；配置 Schema、服务隔离、拦截和热重载等能力仍属于后续设计目标，详见 [核心设计](./design.md)。
+本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject、动态依赖、Event 和同步配置生命周期已经可用；服务隔离、拦截、Logger、Loader 和 HMR 等能力仍属于后续设计目标，详见 [核心设计](./design.md)。
 
 ## 1. 一句话理解 Nya Core
 
@@ -113,7 +113,17 @@ export class ClassComponent {
 - 函数和对象 `apply` 的返回值是 CleanupSource，用于登记本次启动对应的清理操作；
 - class 通过 `new Constructor(context, config)` 启动，构造结果不会作为 CleanupSource；构造期间调用的 `context.effect()` 仍归本次 Fiber 所有。
 
-当前实现只在 TypeScript 类型层面约束配置，不声明或读取静态 `Component.Config`，也不执行运行时 Schema 校验或转换。组件若要求配置存在或满足某些条件，需要暂时自行检查；Standard Schema 仍属于目标设计。
+组件可以声明 `Config?: StandardSchemaV1<unknown, Config>`。配置在组件入口执行前调用 `~standard.validate()` 校验，成功时传给入口的是 Schema 返回的 `value`，因此 Schema 可以填充默认值或转换数据。未声明 Schema 时，输入配置保持原值和原引用。
+
+当前只支持同步 Standard Schema：
+
+- 校验结果含有 `issues` 时抛出导出的 `ValidationError`，并在其 `issues` 中保留原始问题；
+- Schema 返回 Promise 时使用 `TypeError` 明确拒绝；
+- 初始配置校验失败时，入口不执行，Fiber 进入 `FAILED`，错误保存在 `fiber.error` 中。
+
+`ValidationError` 继承 `TypeError`，消息以 `invalid config:` 开头，并用点分路径标出存在 `path` 的 issue。可以使用 `ValidationError.is(error)` 跨 `@nya/core` 包副本识别该错误。
+
+`installComponent()` 仍然同步返回 Fiber；需要观察初始校验或启动错误时，应当 `await fiber` 并处理拒绝。初始 Schema 失败时还没有已验证配置，`fiber.config` 为 `undefined`，需要通过一次合法 `update()` 提交可用配置。
 
 ### 3.4 定义不是实例
 
@@ -133,7 +143,7 @@ first.context !== second.context
 
 ### 3.5 当前的 Runtime 身份
 
-Registry 当前以归一化后的入口引用作为 Component Runtime 的键：函数和 class 使用自身，对象使用 `apply`。因此，两个对象如果复用同一个 `apply` 函数，会被视为共享 Runtime 元数据。Runtime 的名称取第一次建立该 Runtime 时读取到的名称。
+Registry 当前以归一化后的入口引用作为 Component Runtime 的键：函数和 class 使用自身，对象使用 `apply`。因此，两个对象如果复用同一个 `apply` 函数，会被视为共享 Runtime 元数据。Runtime 的名称和配置 Schema 都取第一次建立该 Runtime 时读取到的值。
 
 这是当前实现的身份规则，不等于“任意同名组件都是同一个组件”。如果组件需要独立 Runtime，应使用不同的 `apply` 函数引用。
 
@@ -266,7 +276,8 @@ ctx.inject(['database'], (ctx) => {
 Fiber 表示组件定义的**某一次具体安装**。它负责：
 
 - 保存本次安装的 Context、父 Fiber、配置和 Runtime；
-- 根据服务快照串行执行启动、临时卸载与重新激活；
+- 根据服务快照和配置版本串行执行启动、临时卸载与重新激活；
+- 暴露已校验的目标 `config`，并提供 `update()` 和 `restart()`；
 - 暴露当前状态和启动错误；
 - 拥有本次运行产生的 Effect；
 - 在永久 `dispose()` 后从 Registry 脱离；
@@ -282,7 +293,7 @@ Fiber 表示组件定义的**某一次具体安装**。它负责：
 | `LOADING` | 正在执行组件入口，或等待启动期间创建的 Effect 准备完成 |
 | `ACTIVE` | 本次启动已经成功并达到稳定状态 |
 | `UNLOADING` | 正在撤销该 Fiber 拥有的 Effect |
-| `FAILED` | 组件启动失败，或启动失败后的回滚也出现错误 |
+| `FAILED` | 配置校验或组件启动失败，或启动失败后的回滚也出现错误 |
 | `DISPOSED` | 非根组件已经永久卸载 |
 
 当前普通组件的主要转换是：
@@ -292,12 +303,12 @@ stateDiagram-v2
     [*] --> PENDING
     PENDING --> LOADING: 必需依赖齐备
     LOADING --> ACTIVE: apply 与启动 Effect 完成
-    LOADING --> FAILED: 启动失败并回滚
+    LOADING --> FAILED: 校验或启动失败并回滚
     LOADING --> UNLOADING: 快照过期或请求 dispose
-    ACTIVE --> UNLOADING: 依赖变化或请求 dispose
+    ACTIVE --> UNLOADING: 依赖、配置变化或请求 dispose
     UNLOADING --> PENDING: 临时卸载完成
     PENDING --> UNLOADING: 启动前请求 dispose
-    FAILED --> LOADING: 新的可用依赖 epoch
+    FAILED --> LOADING: 新的可用依赖、合法 update 或启动失败后 restart
     FAILED --> PENDING: 必需依赖变为不可用
     FAILED --> UNLOADING: dispose
     UNLOADING --> DISPOSED: 清理与脱离完成
@@ -307,7 +318,7 @@ stateDiagram-v2
 
 ### 6.3 生命周期串行化
 
-每个 Fiber 都有自己的 Promise 队列。启动和卸载操作进入同一队列，因此同一个 Fiber 不会同时执行两次生命周期转换。
+每个 Fiber 都有自己的 Promise 队列。启动、卸载、配置更新和依赖刷新进入同一协调过程，因此同一个 Fiber 不会同时执行两次生命周期转换。每轮运行固定使用启动时的服务快照和配置；目标变化时，旧 Effect 必须先使用旧运行环境完成清理，新入口才能启动。
 
 如果组件仍在异步启动时调用 `dispose()`：
 
@@ -319,7 +330,32 @@ stateDiagram-v2
 
 这避免了启动逻辑和清理逻辑同时修改同一组资源。
 
-### 6.4 Thenable Fiber
+快速连续更新可以合并协调；Fiber 最终收敛到最新的已校验配置和服务快照，相关更新 Promise 在该目标稳定后才完成。
+
+### 6.4 配置更新与重启
+
+`fiber.config` 返回当前已校验、已转换的目标配置。修改配置使用可等待的 API：
+
+```ts
+await fiber.update(nextConfig)
+await fiber.restart()
+```
+
+`update()` 在改变 Fiber 状态前校验输入。非法更新只会拒绝返回的 Promise，不会替换旧配置或中断正在 ACTIVE 的旧运行。合法更新会经过 `internal/update` waterfall，其监听器：
+
+- 以被更新的 Fiber 作为 `this`；
+- 接收 Schema 已转换的配置和 `next()`；
+- 可以在调用 `next()` 前检查配置、原地调整可变对象配置，或包裹异步工作；`next()` 不接受参数，因此不能替换原始值或对象引用；
+- 可以不调用 `next()` 来取消更新，此时 `update()` 正常完成且不重启；
+- 抛错或拒绝时使 `update()` 拒绝，尚未进入默认终点的配置不会被提交。
+
+如果旧运行的清理函数失败，运行时仍会尝试清理其余 Effect，但不会自动启动新配置。Fiber 保留新目标配置并进入 `FAILED`，`update()` 拒绝；调用方可以处理资源问题后通过 `restart()` 或另一轮合法 `update()` 显式重试。
+
+`restart()` 使用当前已校验配置建立新版本。ACTIVE Fiber 会先清理再启动；入口启动失败的 FAILED Fiber 会清除旧错误并重试；初始 Schema 失败时会重新校验原始输入，若仍失败则继续拒绝，也可以通过合法 `update()` 恢复。缺少依赖的 Fiber 保持 PENDING，并在依赖出现时使用最新配置启动。DISPOSED Fiber 会拒绝 `update()` 和 `restart()`。
+
+根 Fiber 没有可更新的组件配置，因此不支持 `update()`；对它调用 `restart()` 会清空根 Effect 树并在完成后恢复 ACTIVE。
+
+### 6.5 Thenable Fiber
 
 Fiber 实现了 `PromiseLike<void>`，因此可以直接等待：
 
@@ -336,7 +372,7 @@ await fiber
 
 如果启动失败，等待 Fiber 会拒绝，错误也会保存在 `fiber.error` 中。调用方应在需要时捕获这个拒绝。
 
-### 6.5 主动卸载
+### 6.6 主动卸载
 
 ```ts
 await fiber.dispose()
@@ -546,6 +582,7 @@ interface ComponentRuntime {
   name?: string
   kind: 'function' | 'constructor'
   callback: Component.Callback
+  Config?: StandardSchemaV1
   fibers: Set<Fiber>
 }
 ```
@@ -567,7 +604,7 @@ Component Runtime
 
 1. 校验并归一化函数、class 或带 `apply` 的对象定义；
 2. 确认父 Fiber 仍可创建 Effect；
-3. 查找或创建 Component Runtime；
+3. 查找或创建 Component Runtime，并固定该 Runtime 首次读取到的 Schema；
 4. 从父 Context 派生组件 Context；
 5. 创建本次安装的 Fiber；
 6. 把新 Fiber 加入 Runtime 的实例集合；
@@ -745,8 +782,11 @@ Context 的原型链作用域用于组织运行时能力和所有权，不隔离
 | Inject、`ctx.inject()` 与依赖变化驱动重启 | 已实现 |
 | 服务快照与 `ctx.database` 属性代理 | 已实现 |
 | Event 注册、生命周期清理、过滤与多模式派发 | 已实现 |
-| 配置 Schema、更新与重启 | 尚未实现 |
+| Standard Schema 同步校验与转换 | 已实现 |
+| `fiber.config`、`update()` 与 `restart()` | 已实现 |
+| 配置与依赖变化串行化、快速更新收敛 | 已实现 |
 | 服务隔离、拦截与调用方追踪 | 尚未实现 |
+| Logger 与 Effect 树诊断 | 尚未实现 |
 | Loader、HMR 和外围生态 | 不属于当前 Core 阶段 |
 
 阅读源码或撰写示例时，应以这条边界为准。设计文档描述的是预期终态；本文描述的是当前可以依赖的基础心智模型。
@@ -765,5 +805,7 @@ Context 的原型链作用域用于组织运行时能力和所有权，不隔离
 8. Context 派生不能修改父 Context，也不能覆盖根、Registry 或 Fiber 等核心引用。
 9. 启动失败后，本次启动已经登记的 Effect 必须回滚。
 10. 同一个 Fiber 的启动和卸载不能并发执行。
+11. 配置更新与依赖变化必须经过同一串行协调过程，并最终收敛到最新目标。
+12. 配置校验失败不能改变已稳定运行的旧配置和 Effect。
 
 这些不变量比某个类的内部字段布局更重要。内部实现可以演进，但公开语义不应在没有相应设计和测试更新的情况下悄然改变。

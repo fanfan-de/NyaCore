@@ -10,7 +10,7 @@
 
 ## 1. 三十秒理解
 
-Nya Core 是一个嵌入宿主 JavaScript / TypeScript 进程的**作用域组件运行时**：Registry 将可复用的组件定义安装为独立的 Context 与 Fiber；Context 表达组件从哪个作用域观察和操作运行时，Fiber 管理该组件实例的状态、依赖快照和 Effect；ServiceRegistry 根据服务实现变化驱动 Fiber 串行停止和重新启动，所有资源通过 Effect 所有权关系完成失败回滚和级联清理。
+Nya Core 是一个嵌入宿主 JavaScript / TypeScript 进程的**作用域组件运行时**：Registry 将可复用的组件定义安装为独立的 Context 与 Fiber；Context 表达组件从哪个作用域观察和操作运行时，Fiber 管理该组件实例的状态、依赖快照、已校验配置和 Effect；ServiceRegistry 与配置版本共同驱动 Fiber 串行停止和重新启动，所有资源通过 Effect 所有权关系完成失败回滚和级联清理。
 
 可以把核心模型压缩为：
 
@@ -159,26 +159,26 @@ flowchart LR
 
 ## 5. Fiber 生命周期状态机
 
-普通 Fiber 创建后从 PENDING 开始。每个 Fiber 使用自己的 Promise 队列串行执行协调操作，因此同一个实例不会同时启动和卸载。
+普通 Fiber 创建后从 PENDING 开始。每个 Fiber 使用自己的 Promise 队列串行协调依赖快照和配置版本，因此同一个实例不会同时启动和卸载。
 
 ```mermaid
 stateDiagram-v2
     state "PENDING：等待可用依赖快照" as PENDING
     state "LOADING：执行入口并等待启动 Effect" as LOADING
-    state "ACTIVE：当前依赖 epoch 已稳定" as ACTIVE
+    state "ACTIVE：当前依赖与配置已稳定" as ACTIVE
     state "UNLOADING：撤销本轮 Effect" as UNLOADING
-    state "FAILED：当前依赖 epoch 启动失败" as FAILED
+    state "FAILED：配置校验或当前目标启动失败" as FAILED
     state "DISPOSED：实例永久销毁" as DISPOSED
 
     [*] --> PENDING
     PENDING --> LOADING: 必需依赖齐备
     LOADING --> ACTIVE: 入口与启动 Effect 成功
-    LOADING --> FAILED: 启动或回滚失败
+    LOADING --> FAILED: 校验、启动或回滚失败
     LOADING --> UNLOADING: 快照过期或请求销毁
-    ACTIVE --> UNLOADING: 依赖变化或请求销毁
+    ACTIVE --> UNLOADING: 依赖、配置变化或请求销毁
     UNLOADING --> PENDING: 临时卸载完成
     PENDING --> UNLOADING: 请求永久销毁
-    FAILED --> LOADING: 新的可用依赖 epoch
+    FAILED --> LOADING: 合法新目标或启动失败后重试
     FAILED --> PENDING: 必需依赖变为不可用
     FAILED --> UNLOADING: 请求永久销毁
     UNLOADING --> DISPOSED: 非根 Fiber 永久卸载完成
@@ -213,11 +213,15 @@ sequenceDiagram
     Registry->>Fiber: 创建并登记 Context、父 Fiber、Inject 与配置
     Registry->>Parent: 登记安装 Effect
     Parent->>Fiber: start()
-    Fiber->>Services: subscribe() + capture()
+    Fiber->>Services: subscribe()
+    Fiber->>Fiber: 同步校验并转换配置
+    Fiber->>Services: capture()
     Fiber-->>Fiber: 将 reconcile 放入串行队列
     Registry-->>Caller: 返回 Fiber
 
-    alt 必需依赖齐备
+    alt 配置校验失败
+        Fiber->>Fiber: FAILED，入口不执行
+    else 必需依赖齐备
         Fiber->>Fiber: LOADING，执行组件入口
         Fiber->>Fiber: 等待启动阶段 Effect ready
         Fiber->>Fiber: ACTIVE
@@ -299,8 +303,8 @@ flowchart TB
 
 1. 每次普通组件安装恰好创建一个派生 Context 和一个新 Fiber。
 2. Component Runtime 是定义级索引，不能与一次安装产生的实例混为一体。
-3. 同一个 Fiber 的启动、临时卸载、重启和永久销毁必须串行执行。
-4. 一轮运行只读取该 Fiber 固定的依赖快照；清理旧运行时不能提前切换到新实现。
+3. 同一个 Fiber 的启动、临时卸载、配置更新、重启和永久销毁必须串行执行。
+4. 一轮运行只读取该 Fiber 固定的依赖快照和配置；清理旧运行时不能提前切换到新目标。
 5. 重新执行组件入口前，旧运行产生的 Effect 必须完成清理。
 6. 每个 Effect 必须有明确且唯一的 Fiber 或外层 Effect 所有者。
 7. 子 Fiber 的生命周期不能长于安装它的父 Fiber。
@@ -317,7 +321,7 @@ flowchart TB
 | 领域 | 当前架构 | 仍属目标设计 |
 | --- | --- | --- |
 | Component | 函数、class、对象定义；每次安装独立 Context 与 Fiber | Loader、模块发现与 HMR |
-| Config | 安装时传入并由 Fiber 保存；主要由 TypeScript 类型约束 | 运行时 Schema 校验、配置更新驱动重启 |
+| Config | 同步 Standard Schema 校验与转换；`fiber.config`、`update()`、`restart()` 与快速更新收敛 | Loader 读写、配置文件持久化与 HMR |
 | Service | 根树共享同名默认 slot；Inject 快照驱动消费者启停 | 服务隔离、拦截、调用方追踪、callable Service 与 mixin |
 | Effect | CleanupSource、失败回滚、幂等 LIFO 清理和聚合错误 | 可观察的 Effect 诊断树与更完整调试工具 |
 | Event | 生命周期绑定、Context 过滤和五种派发模式 | 与未来隔离和调用方追踪的进一步组合 |

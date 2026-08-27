@@ -20,5 +20,8 @@
   },
   "files": [
     "lib"
-  ]
+  ],
+  "dependencies": {
+    "@standard-schema/spec": "^1.1.0"
+  }
 }
