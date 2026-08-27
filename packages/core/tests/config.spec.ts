@@ -513,6 +513,122 @@ describe('Fiber config concurrency', () => {
     expect(fiber.state).toBe(FiberState.ACTIVE)
   })
 
+  it('does not let a replacement dependency bypass a cleanup failure', async () => {
+    const app = new Context()
+    const error = new Error('dependency cleanup failed')
+    const starts: number[] = []
+    const removeFirst = app.provide('config-test-database', { id: 1 })
+    const fiber = app.installComponent({
+      inject: ['config-test-database'],
+      apply(context) {
+        const database = context.get('config-test-database') as { id: number }
+        starts.push(database.id)
+        if (database.id === 1) {
+          return () => {
+            throw error
+          }
+        }
+      },
+    })
+    await fiber
+
+    await removeFirst()
+    expect(fiber.error).toBe(error)
+    expect(fiber.state).toBe(FiberState.FAILED)
+
+    const removeSecond = app.provide('config-test-database', { id: 2 })
+    await fiber
+
+    expect(starts).toEqual([1])
+    expect(fiber.error).toBe(error)
+    expect(fiber.state).toBe(FiberState.FAILED)
+
+    await fiber.restart()
+
+    expect(starts).toEqual([1, 2])
+    expect(fiber.error).toBeUndefined()
+    expect(fiber.state).toBe(FiberState.ACTIVE)
+    await fiber.dispose()
+    await removeSecond()
+  })
+
+  it('lets a valid update clear a cleanup block while dependencies are missing', async () => {
+    const app = new Context()
+    const error = new Error('old dependency cleanup failed')
+    const starts: string[] = []
+    const removeFirst = app.provide('config-test-database', { id: 1 })
+    const fiber = app.installComponent({
+      inject: ['config-test-database'],
+      apply(context, config: NumberConfig) {
+        const database = context.get('config-test-database') as { id: number }
+        starts.push(`${config.value}:${database.id}`)
+        if (database.id === 1) {
+          return () => {
+            throw error
+          }
+        }
+      },
+    }, { value: 1 })
+    await fiber
+
+    await removeFirst()
+    expect(fiber.state).toBe(FiberState.FAILED)
+
+    await fiber.update({ value: 2 })
+
+    expect(fiber.config).toEqual({ value: 2 })
+    expect(fiber.error).toBeUndefined()
+    expect(fiber.state).toBe(FiberState.PENDING)
+    expect(starts).toEqual(['1:1'])
+
+    const removeSecond = app.provide('config-test-database', { id: 2 })
+    await fiber
+
+    expect(starts).toEqual(['1:1', '2:2'])
+    expect(fiber.state).toBe(FiberState.ACTIVE)
+    await fiber.dispose()
+    await removeSecond()
+  })
+
+  it('blocks a new dependency epoch when startup rollback cleanup fails', async () => {
+    const app = new Context()
+    const startupError = new Error('startup failed')
+    const rollbackError = new Error('startup rollback failed')
+    let attempts = 0
+    let shouldFail = true
+    const removeFirst = app.provide('config-test-gate', { id: 1 })
+    const fiber = app.installComponent({
+      inject: ['config-test-gate'],
+      apply(context) {
+        attempts++
+        if (!shouldFail) return
+        context.effect(() => () => {
+          throw rollbackError
+        })
+        throw startupError
+      },
+    })
+
+    await expect(Promise.resolve(fiber)).rejects.toBeInstanceOf(AggregateError)
+    expect(fiber.state).toBe(FiberState.FAILED)
+    expect(attempts).toBe(1)
+
+    await removeFirst()
+    const removeSecond = app.provide('config-test-gate', { id: 2 })
+    await fiber
+
+    expect(fiber.state).toBe(FiberState.FAILED)
+    expect(attempts).toBe(1)
+
+    shouldFail = false
+    await fiber.restart()
+
+    expect(fiber.state).toBe(FiberState.ACTIVE)
+    expect(attempts).toBe(2)
+    await fiber.dispose()
+    await removeSecond()
+  })
+
   it('converges simultaneous config and dependency changes to both latest values', async () => {
     const app = new Context()
     const events: string[] = []

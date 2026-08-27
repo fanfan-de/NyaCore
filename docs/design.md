@@ -346,7 +346,7 @@ PENDING     等待依赖
 LOADING     正在启动
 ACTIVE      正常运行
 UNLOADING   正在撤销本次运行
-FAILED      配置校验或启动失败
+FAILED      配置校验、启动、运行清理或启动回滚失败
 DISPOSED    实例已永久销毁
 ```
 
@@ -357,8 +357,9 @@ stateDiagram-v2
     [*] --> PENDING
     PENDING --> LOADING: 依赖满足
     LOADING --> ACTIVE: 启动完成
-    LOADING --> FAILED: 校验或启动失败
+    LOADING --> FAILED: 校验、启动或回滚清理失败
     ACTIVE --> UNLOADING: 依赖、配置或代码变化
+    UNLOADING --> FAILED: 运行清理失败
     FAILED --> UNLOADING: 清理部分副作用
     UNLOADING --> PENDING: 必需依赖缺失
     UNLOADING --> LOADING: 新依赖快照已就绪
@@ -378,6 +379,7 @@ stateDiagram-v2
 - 异步生成器在 epoch 失效后不能继续登记新的长期资源；
 - `await fiber` 必须等待当前所有启停任务稳定；
 - 多次快速变化最终必须收敛到最新依赖和配置。
+- 运行清理或启动回滚中的清理失败后，依赖通知不得自动启动新运行；必须由合法配置更新或显式重启解除阻塞。
 
 epoch 可以由所有依赖实现所属 Fiber 的实例编号组成。任一服务实现变化都会产生新的 epoch，从而驱动消费者重启。
 

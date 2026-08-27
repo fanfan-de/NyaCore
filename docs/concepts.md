@@ -278,7 +278,7 @@ Fiber 表示组件定义的**某一次具体安装**。它负责：
 - 保存本次安装的 Context、父 Fiber、配置和 Runtime；
 - 根据服务快照和配置版本串行执行启动、临时卸载与重新激活；
 - 暴露已校验的目标 `config`，并提供 `update()` 和 `restart()`；
-- 暴露当前状态和启动错误；
+- 暴露当前状态和生命周期错误；
 - 拥有本次运行产生的 Effect；
 - 在永久 `dispose()` 后从 Registry 脱离；
 - 让调用方等待当前生命周期转换稳定。
@@ -293,7 +293,7 @@ Fiber 表示组件定义的**某一次具体安装**。它负责：
 | `LOADING` | 正在执行组件入口，或等待启动期间创建的 Effect 准备完成 |
 | `ACTIVE` | 本次启动已经成功并达到稳定状态 |
 | `UNLOADING` | 正在撤销该 Fiber 拥有的 Effect |
-| `FAILED` | 配置校验或组件启动失败，或启动失败后的回滚也出现错误 |
+| `FAILED` | 配置校验、组件启动、运行清理或启动回滚失败 |
 | `DISPOSED` | 非根组件已经永久卸载 |
 
 当前普通组件的主要转换是：
@@ -303,18 +303,19 @@ stateDiagram-v2
     [*] --> PENDING
     PENDING --> LOADING: 必需依赖齐备
     LOADING --> ACTIVE: apply 与启动 Effect 完成
-    LOADING --> FAILED: 校验或启动失败并回滚
+    LOADING --> FAILED: 校验、启动或回滚清理失败
     LOADING --> UNLOADING: 快照过期或请求 dispose
     ACTIVE --> UNLOADING: 依赖、配置变化或请求 dispose
+    UNLOADING --> FAILED: 运行清理失败
     UNLOADING --> PENDING: 临时卸载完成
     PENDING --> UNLOADING: 启动前请求 dispose
-    FAILED --> LOADING: 新的可用依赖、合法 update 或启动失败后 restart
-    FAILED --> PENDING: 必需依赖变为不可用
+    FAILED --> LOADING: 新目标可重试，或显式 update / restart
+    FAILED --> PENDING: 非清理失败且必需依赖变为不可用
     FAILED --> UNLOADING: dispose
     UNLOADING --> DISPOSED: 清理与脱离完成
 ```
 
-`dispose()` 请求会让普通 Fiber 在清理后进入 `DISPOSED`；依赖变化触发的卸载只销毁当前运行作用域，Fiber 本身及其依赖订阅仍然保留，因此可以重新进入 `LOADING`。
+`dispose()` 请求会让普通 Fiber 在清理后进入 `DISPOSED`；依赖变化触发的卸载只销毁当前运行作用域，Fiber 本身及其依赖订阅仍然保留，因此可以重新进入 `LOADING`。如果运行清理或启动回滚中的清理失败，Fiber 会停在 `FAILED`；后续依赖通知只能更新目标，不能自动启动新运行，必须通过合法 `update()` 或 `restart()` 显式解除阻塞。
 
 ### 6.3 生命周期串行化
 

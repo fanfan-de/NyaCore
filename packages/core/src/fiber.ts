@@ -18,7 +18,7 @@ export enum FiberState {
   ACTIVE = 'ACTIVE',
   /** 正在撤销当前一轮运行产生的全部 Effect。 */
   UNLOADING = 'UNLOADING',
-  /** 当前配置与依赖目标的校验或组件启动失败。 */
+  /** 当前配置与依赖目标的校验、组件启动或资源清理失败。 */
   FAILED = 'FAILED',
   /** 组件实例已永久销毁，不会再因服务变化而启动。 */
   DISPOSED = 'DISPOSED',
@@ -64,6 +64,9 @@ export class Fiber implements PromiseLike<void> {
 
   /** 同一服务与配置目标启动失败后不空转重试；目标变化后才重新尝试。 */
   #failedTarget: string | undefined
+
+  /** 清理失败后阻止自动通知启动新运行，直到显式 update 或 restart。 */
+  #cleanupBlocked = false
 
   #currentScope: EffectScope | undefined
   #startupScopes: EffectScope[] | undefined
@@ -278,6 +281,7 @@ export class Fiber implements PromiseLike<void> {
     }
 
     this.#configVersion++
+    this.#cleanupBlocked = false
     this.#failedTarget = undefined
     this.error = undefined
     this.#scheduleReconcile()
@@ -345,6 +349,8 @@ export class Fiber implements PromiseLike<void> {
 
     if (this.#hasConfigError) return this.state === FiberState.FAILED
 
+    if (this.#cleanupBlocked) return this.state === FiberState.FAILED
+
     const desired = this.#desiredSnapshot
     if (!desired) {
       return !this.#activeSnapshot && this.state === FiberState.PENDING
@@ -369,6 +375,12 @@ export class Fiber implements PromiseLike<void> {
         this.error = this.#configError
         this.#setState(FiberState.FAILED)
         throw this.#configError
+      }
+
+      // 依赖通知只能更新 desired target，不能在资源清理失败后自行恢复。
+      if (this.#cleanupBlocked) {
+        this.#setState(FiberState.FAILED)
+        return
       }
 
       const desired = this.#desiredSnapshot
@@ -455,6 +467,7 @@ export class Fiber implements PromiseLike<void> {
       try {
         await this.#runEffects.dispose()
       } catch (cleanupError) {
+        this.#cleanupBlocked = true
         failure = new AggregateError(
           [error, cleanupError],
           `component ${runtime.name ?? 'anonymous'} failed to start and roll back`,
@@ -562,14 +575,9 @@ export class Fiber implements PromiseLike<void> {
 
   #failCleanup(error: unknown) {
     this.error = error
-    const desired = this.#desiredSnapshot
-    if (desired) {
-      this.#failedTarget = this.#getTarget(desired)
-      this.#setState(FiberState.FAILED)
-    } else {
-      this.#failedTarget = undefined
-      this.#setState(FiberState.PENDING)
-    }
+    this.#cleanupBlocked = true
+    this.#failedTarget = undefined
+    this.#setState(FiberState.FAILED)
   }
 
   async #commitConfig(config: unknown, request: number) {
@@ -581,6 +589,7 @@ export class Fiber implements PromiseLike<void> {
     this.#hasConfigError = false
     this.#configError = undefined
     this.#configVersion++
+    this.#cleanupBlocked = false
     this.#failedTarget = undefined
     this.error = undefined
     this.#scheduleReconcile()
