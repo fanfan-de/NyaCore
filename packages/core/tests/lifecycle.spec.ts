@@ -270,6 +270,81 @@ describe('component lifecycle', () => {
     expect(app.registry.get(component)).toBeUndefined()
   })
 
+  it('reports cleanup failure when disposed during asynchronous startup', async () => {
+    const app = new Context()
+    const error = new Error('cleanup after startup failed')
+    let finishStartup!: () => void
+    let markStarted!: () => void
+    const started = new Promise<void>(resolve => {
+      markStarted = resolve
+    })
+    const startup = new Promise<void>(resolve => {
+      finishStartup = resolve
+    })
+
+    const fiber = app.installComponent({
+      name: 'disposing-startup',
+      async apply() {
+        markStarted()
+        await startup
+        return () => {
+          throw error
+        }
+      },
+    })
+
+    await started
+    const disposing = fiber.dispose()
+    finishStartup()
+
+    await expect(disposing).rejects.toBe(error)
+    expect(fiber.error).toBe(error)
+    expect(fiber.state).toBe(FiberState.DISPOSED)
+  })
+
+  it('does not duplicate rollback errors while disposing failed setup', async () => {
+    const app = new Context()
+    const setupError = new Error('effect setup failed')
+    const cleanupError = new Error('effect rollback failed')
+    let rejectSetup!: (reason: unknown) => void
+    let markStarted!: () => void
+    const started = new Promise<void>(resolve => {
+      markStarted = resolve
+    })
+    const setup = new Promise<void>((_resolve, reject) => {
+      rejectSetup = reject
+    })
+
+    const fiber = app.installComponent({
+      name: 'failed-setup-disposal',
+      apply(context) {
+        context.effect(() => {
+          context.effect(() => () => {
+            throw cleanupError
+          })
+          markStarted()
+          return setup
+        })
+      },
+    })
+
+    await started
+    const disposing = fiber.dispose()
+    rejectSetup(setupError)
+    const failure = await disposing.then(
+      () => undefined,
+      error => error,
+    )
+
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect((failure as AggregateError).errors).toEqual([
+      setupError,
+      cleanupError,
+    ])
+    expect(fiber.error).toBe(failure)
+    expect(fiber.state).toBe(FiberState.DISPOSED)
+  })
+
   it('disposes child components with their parent', async () => {
     const app = new Context()
     const parentDispose = vi.fn()

@@ -6,7 +6,11 @@ import type { CleanupSource, Disposer } from './disposable.js'
 import type { Component, ResolvedInject } from './component.js'
 import type { ComponentRuntime } from './registry.js'
 import type { DependencySnapshot, ServiceAddress } from './service.js'
-import { serviceInit } from './symbols.js'
+import {
+  serviceCapture,
+  serviceInit,
+  serviceSubscribe,
+} from './symbols.js'
 import { resolveConfig } from './config.js'
 
 export enum FiberState {
@@ -22,6 +26,28 @@ export enum FiberState {
   FAILED = 'FAILED',
   /** 组件实例已永久销毁，不会再因服务变化而启动。 */
   DISPOSED = 'DISPOSED',
+}
+
+/** 判断一个失败是否已经由 AggregateError 递归包含，避免重复报告同一原因。 */
+function includesFailure(
+  container: unknown,
+  target: unknown,
+  seen = new Set<AggregateError>(),
+): boolean {
+  if (Object.is(container, target)) return true
+  if (!(container instanceof AggregateError) || seen.has(container)) {
+    return false
+  }
+
+  seen.add(container)
+  let errors: unknown
+  try {
+    errors = container.errors
+  } catch {
+    return false
+  }
+  if (!Array.isArray(errors)) return false
+  return errors.some(error => includesFailure(error, target, seen))
 }
 
 /** 管理一次组件安装，以及该实例随依赖变化产生的多轮运行。 */
@@ -77,6 +103,9 @@ export class Fiber implements PromiseLike<void> {
   #reconcileOperation: Promise<void> | undefined
 
   #disposeOperation: Promise<void> | undefined
+
+  /** dispose() 已登记后发生的清理错误，最终在完成永久卸载后统一抛出。 */
+  #disposeErrors: unknown[] | undefined
 
   private constructor(options: {
     context: Context
@@ -141,7 +170,7 @@ export class Fiber implements PromiseLike<void> {
   start() {
     if (this.isRoot || this.#unsubscribe || this.#disposeOperation) return this
 
-    this.#unsubscribe = this.context.root.services.subscribe(
+    this.#unsubscribe = this.context.root.services[serviceSubscribe](
       this.context,
       this,
       this.inject,
@@ -169,7 +198,7 @@ export class Fiber implements PromiseLike<void> {
       return
     }
 
-    this.#desiredSnapshot = this.context.root.services.capture(
+    this.#desiredSnapshot = this.context.root.services[serviceCapture](
       this.context,
       this.inject,
     )
@@ -304,6 +333,7 @@ export class Fiber implements PromiseLike<void> {
     if (this.#disposeOperation) return this.#disposeOperation
 
     this.#desiredSnapshot = undefined
+    this.#disposeErrors = []
     this.#disposeOperation = this.#enqueue(() => this.#dispose())
     return this.#disposeOperation
   }
@@ -439,7 +469,7 @@ export class Fiber implements PromiseLike<void> {
         )
       } catch (error) {
         // 过期启动在内部卸载时也可能清理失败；此时不能静默启动新目标。
-        if (!this.#disposeOperation && this.state !== FiberState.FAILED) {
+        if (this.state !== FiberState.FAILED) {
           this.#failCleanup(error)
         }
         throw error
@@ -472,19 +502,26 @@ export class Fiber implements PromiseLike<void> {
         await this.#startupScopes[index].ready
       }
     } catch (error) {
-      this.error = error
       let failure = error
 
       try {
         await this.#runEffects.dispose()
       } catch (cleanupError) {
         this.#cleanupBlocked = true
-        failure = new AggregateError(
-          [error, cleanupError],
-          `component ${runtime.name ?? 'anonymous'} failed to start and roll back`,
-        )
+        if (includesFailure(error, cleanupError)) {
+          failure = error
+        } else if (includesFailure(cleanupError, error)) {
+          failure = cleanupError
+        } else {
+          failure = new AggregateError(
+            [error, cleanupError],
+            `component ${runtime.name ?? 'anonymous'} failed to start and roll back`,
+          )
+        }
+        this.#recordDisposeError(failure)
       }
 
+      this.error = failure
       this.#runEffects = undefined
       this.#activeSnapshot = undefined
       this.#activeConfigVersion = undefined
@@ -524,8 +561,9 @@ export class Fiber implements PromiseLike<void> {
       this.#runEffects = undefined
       this.#activeSnapshot = undefined
       this.#activeConfigVersion = undefined
-      if (!this.#disposeOperation) this.#setState(FiberState.PENDING)
     }
+
+    if (!this.#disposeOperation) this.#setState(FiberState.PENDING)
   }
 
   async #dispose() {
@@ -535,6 +573,8 @@ export class Fiber implements PromiseLike<void> {
 
     try {
       await this.#unloadRun()
+    } catch (error) {
+      this.#recordDisposeError(error)
     } finally {
       this.#unsubscribe?.()
       this.#unsubscribe = undefined
@@ -554,6 +594,16 @@ export class Fiber implements PromiseLike<void> {
         this.#setState(FiberState.DISPOSED)
       }
     }
+
+    const errors = this.#disposeErrors ?? []
+    this.#disposeErrors = undefined
+    if (errors.length === 0) return
+
+    const failure = errors.length === 1
+      ? errors[0]
+      : new AggregateError(errors, 'multiple errors while disposing fiber')
+    this.error = failure
+    throw failure
   }
 
   #invoke(runtime: ComponentRuntime, config: unknown): CleanupSource {
@@ -588,7 +638,12 @@ export class Fiber implements PromiseLike<void> {
     this.error = error
     this.#cleanupBlocked = true
     this.#failedTarget = undefined
+    this.#recordDisposeError(error)
     this.#setState(FiberState.FAILED)
+  }
+
+  #recordDisposeError(error: unknown) {
+    this.#disposeErrors?.push(error)
   }
 
   async #commitConfig(config: unknown, request: number) {

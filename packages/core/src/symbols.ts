@@ -1,4 +1,4 @@
-/** 本文件集中定义 `@nya/core` 跨模块及跨包副本共享的协议 Symbol。 */
+/** 本文件集中定义 Core 协议 Symbol，并区分全局互操作协议与包内协议。 */
 
 export const contextMarker = Symbol.for('@nya/core/context')
 
@@ -9,6 +9,12 @@ export type IsolationLabel = symbol
 export const contextIsolations: unique symbol = Symbol.for(
   '@nya/core/context.isolations',
 ) as any
+
+/** Fiber 捕获服务快照的包内协议，不从公共入口导出。 */
+export const serviceCapture = Symbol('@nya/core/service.capture')
+
+/** Fiber 订阅服务地址变化的包内协议，不从公共入口导出。 */
+export const serviceSubscribe = Symbol('@nya/core/service.subscribe')
 
 /** 事件 thisArg 可以实现本协议，按订阅方 Context 过滤局部监听器。 */
 export const contextFilter: unique symbol = Symbol.for(

@@ -609,7 +609,12 @@ describe('Fiber config concurrency', () => {
       },
     })
 
-    await expect(Promise.resolve(fiber)).rejects.toBeInstanceOf(AggregateError)
+    const failure = await Promise.resolve(fiber).then(
+      () => undefined,
+      error => error,
+    )
+    expect(failure).toBeInstanceOf(AggregateError)
+    expect(fiber.error).toBe(failure)
     expect(fiber.state).toBe(FiberState.FAILED)
     expect(attempts).toBe(1)
 

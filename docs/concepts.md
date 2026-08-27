@@ -302,6 +302,8 @@ ctx.inject(['database'], (ctx) => {
 
 `'database' in context` 也只观察当前隔离地址是否已被运行时认识，例如发生过服务注册或依赖声明；其他标签存在同名服务不会使这个判断变成 `true`。它不等同于“当前存在 ACTIVE 实现”，实际值仍应通过属性读取或 `get()` 获取。
 
+Context 自身已经定义的成员名（例如 `isolate`、`get` 或 `effect`）由真实 API 优先占用，不进入服务属性代理。服务仍可使用这些非空名称注册和注入，但消费者必须通过 `context.get(name)` 读取；此时 `name in context` 观察到的是 Context 成员，而不是服务 slot。
+
 Core 已提供最小 `Service` 基类。子类可以通过 `static provide` 或构造器参数声明服务名，实例会自动注册到当前 Context；`Service.init` 的异步初始化会阻止服务在完成前变为可用，`Service.check` 可以让实例暂时不满足消费者依赖。`Service.config`、`Service.invoke`、`Service.extend`、callable Service 和 mixin 仍属于后续高级协议。
 
 Context 拦截配置和调用方 Context 追踪尚未实现。Service 作为事件 `thisArg` 时按照调用方隔离标签过滤监听器也依赖该追踪能力，因此本轮服务隔离不应被理解为已经完成事件隔离。
@@ -339,6 +341,7 @@ Fiber 表示组件定义的**某一次具体安装**。它负责：
 stateDiagram-v2
     [*] --> PENDING
     PENDING --> LOADING: 必需依赖齐备
+    PENDING --> FAILED: 初始配置校验失败
     LOADING --> ACTIVE: apply 与启动 Effect 完成
     LOADING --> FAILED: 校验、启动或回滚清理失败
     LOADING --> UNLOADING: 快照过期或请求 dispose
@@ -347,7 +350,7 @@ stateDiagram-v2
     UNLOADING --> PENDING: 临时卸载完成
     PENDING --> UNLOADING: 启动前请求 dispose
     FAILED --> LOADING: 新目标可重试，或显式 update / restart
-    FAILED --> PENDING: 非清理失败且必需依赖变为不可用
+    FAILED --> PENDING: 依赖失效，或显式恢复后仍缺失
     FAILED --> UNLOADING: dispose
     UNLOADING --> DISPOSED: 清理与脱离完成
 ```

@@ -8,8 +8,10 @@ import type { ResolvedInject } from './component.js'
 import type { IsolationLabel } from './symbols.js'
 import {
   contextIsolations,
+  serviceCapture,
   serviceCheck,
   serviceInit,
+  serviceSubscribe,
 } from './symbols.js'
 
 /** 一个服务实现所在的严格解析地址。 */
@@ -165,7 +167,7 @@ export class ServiceRegistry {
   }
 
   /** 为一次组件运行捕获全部必需服务；任意一项不可用时返回 undefined。 */
-  capture(
+  [serviceCapture](
     context: Context,
     inject: ResolvedInject,
   ): DependencySnapshot | undefined {
@@ -198,7 +200,7 @@ export class ServiceRegistry {
   }
 
   /** 把 Fiber 加入所有依赖 slot 的反向索引，永久卸载时由返回函数取消。 */
-  subscribe(
+  [serviceSubscribe](
     context: Context,
     fiber: Fiber,
     inject: ResolvedInject,

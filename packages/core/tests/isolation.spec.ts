@@ -7,6 +7,7 @@ import {
   Service,
   type IsolationLabel,
 } from '../src/index.js'
+import { serviceCapture } from '../src/symbols.js'
 
 interface TestService {
   id: number
@@ -360,7 +361,7 @@ describe('service isolation', () => {
       'cannot resolve a service from another Context tree',
     )
 
-    const snapshot = firstRoot.services.capture(
+    const snapshot = firstRoot.services[serviceCapture](
       first,
       new Set(['database']),
     )
@@ -368,6 +369,7 @@ describe('service isolation', () => {
     expect(implementation?.address).toEqual({ name: 'database', label })
     expect(implementation?.providerContext).toBe(first)
     expect(implementation?.owner).toBe(firstRoot.fiber)
+    expect(Reflect.get(firstRoot.services, 'capture')).toBeUndefined()
 
     const removeSecond = second.provide('database', { id: 2 })
     await secondConsumer
@@ -377,6 +379,27 @@ describe('service isolation', () => {
 
     await secondConsumer.dispose()
     await Promise.all([removeSecond(), removeFirst()])
+  })
+
+  it('uses explicit get for service names reserved by the Context API', async () => {
+    const app = new Context()
+    const scoped = app.isolate('isolate')
+    const service = { id: 1 }
+    const remove = scoped.provide('isolate', service)
+    let observed: unknown
+    const consumer = scoped.inject(['isolate'], (context) => {
+      expect(typeof context.isolate).toBe('function')
+      observed = context.get('isolate')
+    })
+
+    await consumer
+
+    expect(consumer.state).toBe(FiberState.ACTIVE)
+    expect(observed).toBe(service)
+    expect('isolate' in scoped).toBe(true)
+
+    await consumer.dispose()
+    await remove()
   })
 
   it('validates service names and symbol labels at runtime and compile time', () => {
