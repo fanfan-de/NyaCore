@@ -48,6 +48,7 @@ Nya 最初以服务名作为一棵 Root Context 内的唯一服务身份。这�
 
 ## 关联
 
+- [ADR-0004：Service 调用保留调用方 Context 并按隔离地址过滤事件](./0004-service-caller-context.md)
 - [核心概念指南](../concepts.md)
 - [当前架构总览](../architecture.md)
 - [核心设计](../design.md)

@@ -7,7 +7,7 @@
 
 本文解释 Nya Core 当前代码中的核心概念、概念之间的关系，以及这些概念在生命周期中的实际行为。它面向第一次阅读代码的开发者，也可以作为编写组件时的心智模型。
 
-本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject、严格服务隔离、动态依赖、Event 和同步配置生命周期已经可用；Context 拦截、调用方追踪、Logger、Loader 和 HMR 等能力仍属于后续设计目标，详见 [核心设计](./design.md)。
+本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject、严格服务隔离、Service 调用方 Context 追踪、隔离事件过滤、动态依赖、Event 和同步配置生命周期已经可用；Context 拦截、callable Service、Logger、Loader 和 HMR 等能力仍属于后续设计目标，详见 [核心设计](./design.md)。
 
 ## 1. 一句话理解 Nya Core
 
@@ -306,7 +306,49 @@ Context 自身已经定义的成员名（例如 `isolate`、`get` 或 `effect`�
 
 Core 已提供最小 `Service` 基类。子类可以通过 `static provide` 或构造器参数声明服务名，实例会自动注册到当前 Context；`Service.init` 的异步初始化会阻止服务在完成前变为可用，`Service.check` 可以让实例暂时不满足消费者依赖。`Service.config`、`Service.invoke`、`Service.extend`、callable Service 和 mixin 仍属于后续高级协议。
 
-Context 拦截配置和调用方 Context 追踪尚未实现。Service 作为事件 `thisArg` 时按照调用方隔离标签过滤监听器也依赖该追踪能力，因此本轮服务隔离不应被理解为已经完成事件隔离。
+### 5.7 Service 调用方 Context
+
+消费者从 Context 属性或 `get()` 取得 `Service` 实例时，运行时返回绑定到本次调用 Context 的 Proxy 视图。普通 prototype 方法中的 `this.ctx` 因而是从调用方派生的混合 Context，而 Service 的依赖读取仍受提供方 Fiber 本轮固定快照约束：Service 不能借用消费者的 `inject` 绕过自己的依赖声明，也不会在同一轮调用中实时切换依赖实现。
+
+```ts
+class DatabaseService extends Service {
+  static provide = 'database'
+
+  callerFiber() {
+    // this.ctx 是从消费者派生的混合 Context，资源归消费者 Fiber。
+    return this.ctx.fiber
+  }
+}
+
+const consumer = app.installComponent({
+  inject: ['database'],
+  apply(context) {
+    context.database.callerFiber() === context.fiber
+  },
+})
+```
+
+方法中的 `this.ctx` 是从调用方派生、同时带有提供方依赖来源的混合 Context，不保证与消费者持有的 Context 引用相等；它的 `root`、`fiber`、隔离视图和资源所有权来自调用方，但服务属性、`get()` 与 `name in context` 按提供方依赖地址解释。同一 Context 对同一个服务实现重复读取会得到稳定视图；不同调用 Context 得到不同视图，但共享同一个提供方实例。绑定不会临时修改原 Service 的 `ctx`，因此同步嵌套调用和跨 `await` 的并发调用不会互相覆盖。Service 方法通过该调用 Context 创建的 Effect、监听器或子组件归调用方 Fiber；需要与提供方同寿命的资源应在构造或 `Service.init` 中创建。
+
+这项包装只适用于继承 `Service` 的实例。通过 `context.provide()` 注册的普通对象、函数和原生对象保持原始引用，不会获得调用方 Context 绑定：
+
+```ts
+const database = { query() {} }
+app.provide('database', database)
+
+app.database === database
+```
+
+调用代理还有两项 JavaScript 语言限制：
+
+- 需要读取调用方 `this.ctx` 的方法必须写成 prototype 普通方法。箭头函数 class field 在构造时已经词法绑定原实例，会绕过 Proxy 的 `this`；
+- 实例自身的函数值保持原 identity 与可构造性，不提供可解构的稳定绑定；prototype 普通方法和 prototype Symbol 方法才会获得稳定 wrapper；
+- prototype 方法以 Proxy 作为 `this` 执行，不能访问原生 `#private` 字段，否则会触发 private brand 检查。此类状态应使用普通字段或 TypeScript `private` / `protected` 字段。
+- facade 的 `ctx` 不能改写、删除或重新定义；facade 也不能被冻结、密封或设为不可扩展。
+
+在混合 Context 上继续调用 `extend()` 或 `isolate()` 时，派生结果会成为后续下游 Service 的新调用方视图，同时保留当前 Service 的提供方依赖来源。通过混合 Context 安装的新组件会清除这项调用帧，改用组件自己的 `inject` 和快照。Root 提供方没有组件快照，其依赖读取保持 Root 当前地址的实时、非 `inject` 限制语义。
+
+上述调用身份、资源归属和代理限制记录在 [ADR-0004](./adr/0004-service-caller-context.md) 中；[Playground 场景](../playground/src/scenarios/service-caller-context.ts)演示了异步调用、Effect 所有权与隔离事件过滤。Context 拦截配置、callable Service、`Service.extend` 和 mixin 尚未实现。
 
 ## 6. Fiber：单次安装的生命周期控制器
 
@@ -727,7 +769,21 @@ await stop()
 
 `emit()` 不等待监听器返回的 Promise，也不接管异步拒绝；需要等待异步监听器或汇总失败时应使用 `parallel()`，需要有序短路时应使用 `serial()`。
 
-派发可以使用 `context.emit(thisArg, name, ...args)` 传入显式 `thisArg`。如果该对象通过 `Context.filter` Symbol 提供接收 `subscriptionContext` 的过滤方法，只有过滤结果为 truthy 的局部监听器才会收到事件；使用 `{ global: true }` 注册的监听器会跳过这项过滤。Hook 会保留订阅方 Context，为后续让 Service `thisArg` 结合调用方 Context 和隔离标签过滤监听器预留作用域信息。
+派发可以使用 `context.emit(thisArg, name, ...args)` 传入显式 `thisArg`。如果该对象通过 `Context.filter` Symbol 提供接收 `subscriptionContext` 的过滤方法，只有过滤结果为 truthy 的局部监听器才会收到事件；使用 `{ global: true }` 注册的监听器会跳过这项过滤。
+
+`Service` 已实现这一过滤协议。Service 方法把自身作为显式 `thisArg` 派发时，EventRegistry 使用它绑定的调用方 Context，在该 Service 名称上比较订阅 Context 的隔离标签；只有同一 Root、同一标签的局部监听器会被调用：
+
+```ts
+class DatabaseService extends Service {
+  static provide = 'database'
+
+  announce() {
+    this.ctx.emit(this, 'database/ready')
+  }
+}
+```
+
+普通事件不会自动按所有服务隔离标签过滤；只有显式传入实现过滤协议的 `thisArg` 才进入这条路径。普通 `provide()` 对象也不会自动获得 Service 的过滤能力。隔离事件仍是进程内路由，不是权限控制。
 
 ## 13. 完整示例
 
@@ -828,7 +884,9 @@ Context 的原型链作用域以及 `isolate()` 用于组织服务可见性和�
 | Standard Schema 同步校验与转换 | 已实现 |
 | `fiber.config`、`update()` 与 `restart()` | 已实现 |
 | 配置与依赖变化串行化、快速更新收敛 | 已实现 |
-| Context 拦截、调用方追踪与隔离事件过滤 | 尚未实现 |
+| Service 调用方 Context 追踪 | 已实现 |
+| Service `thisArg` 隔离事件过滤 | 已实现 |
+| Context 拦截、callable Service 与 mixin | 尚未实现 |
 | Logger 与 Effect 树诊断 | 尚未实现 |
 | Loader、HMR 和外围生态 | 不属于当前 Core 阶段 |
 
@@ -852,5 +910,7 @@ Context 的原型链作用域以及 `isolate()` 用于组织服务可见性和�
 12. 配置校验失败不能改变已稳定运行的旧配置和 Effect。
 13. 服务隔离严格匹配当前地址，缺失时不能回退默认实现。
 14. 同一轮运行及其清理只能读取启动时捕获的服务快照。
+15. Service 调用视图只能绑定调用方 Context，不能临时修改原实例的提供方 Context。
+16. Service 的隔离事件过滤必须同时匹配 Root 和该服务名的隔离标签。
 
 这些不变量比某个类的内部字段布局更重要。内部实现可以演进，但公开语义不应在没有相应设计和测试更新的情况下悄然改变。

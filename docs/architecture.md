@@ -10,7 +10,7 @@
 
 ## 1. 三十秒理解
 
-Nya Core 是一个嵌入宿主 JavaScript / TypeScript 进程的**作用域组件运行时**：Registry 将可复用的组件定义安装为独立的 Context 与 Fiber；Context 表达组件从哪个服务隔离视图观察和操作运行时，Fiber 管理该组件实例的状态、依赖快照、已校验配置和 Effect；ServiceRegistry 与配置版本共同驱动 Fiber 串行停止和重新启动，所有资源通过 Effect 所有权关系完成失败回滚和级联清理。
+Nya Core 是一个嵌入宿主 JavaScript / TypeScript 进程的**作用域组件运行时**：Registry 将可复用的组件定义安装为独立的 Context 与 Fiber；Context 表达组件从哪个服务隔离视图观察和操作运行时，Fiber 管理该组件实例的状态、依赖快照、已校验配置和 Effect；ServiceRegistry 与配置版本共同驱动 Fiber 串行停止和重新启动，Service 调用视图保留消费者 Context，所有资源通过 Effect 所有权关系完成失败回滚和级联清理。
 
 可以把核心模型压缩为：
 
@@ -96,6 +96,8 @@ flowchart TB
     Context -->|"on / emit 等"| Events
 
     Services <-->|"捕获快照、订阅变化<br/>通知重新协调"| Fiber
+    Services -->|"为 Service 绑定调用方 Context"| Facade["Service Proxy 视图"]
+    Facade -->|"显式 thisArg + Context.filter"| Events
     Fiber -->|"执行入口"| Definition
     Fiber -->|"拥有本轮运行"| Effects["DisposableStack<br/>EffectScope 与 Disposer"]
     Events -->|"索引"| Hook["Event Hook"]
@@ -109,20 +111,21 @@ flowchart TB
 | Registry / Component Runtime | 把定义安装为 Context + Fiber；按入口引用索引同一定义产生的 Fiber | [`registry.ts`](../packages/core/src/registry.ts) |
 | Fiber | 串行协调单次安装的启动、临时卸载、重启和永久销毁；固定本轮依赖快照 | [`fiber.ts`](../packages/core/src/fiber.ts) |
 | DisposableStack / EffectScope | 收集 CleanupSource；提供幂等、后进先出、失败回滚和聚合错误清理 | [`disposable.ts`](../packages/core/src/disposable.ts) |
-| ServiceRegistry / Service | 注册具名服务、捕获依赖快照、维护反向订阅并通知消费者 | [`service.ts`](../packages/core/src/service.ts) |
+| ServiceRegistry / Service | 注册具名服务、捕获依赖快照、维护反向订阅、绑定 Service 调用方 Context 并通知消费者 | [`service.ts`](../packages/core/src/service.ts) |
 | EventRegistry | 保存带订阅 Context 的 Hook，提供多模式派发和作用域过滤 | [`events.ts`](../packages/core/src/events.ts) |
 | 协议 Symbol | 支持 Context 识别、事件过滤和 Service 生命周期协议 | [`symbols.ts`](../packages/core/src/symbols.ts) |
 
 `index.ts` 是公共 API 边界；某个内部类存在不代表它一定是稳定契约，实际导出以 [`packages/core/src/index.ts`](../packages/core/src/index.ts) 为准。
 
-## 4. 四个互补的运行时视图
+## 4. 五个互补的运行时视图
 
-不能只用一棵“组件树”解释 Nya Core。当前运行时同时存在四种含义不同的关系：
+不能只用一棵“组件树”解释 Nya Core。当前运行时同时存在五种含义不同的关系：
 
 1. Context 派生关系表达空间与能力入口；
 2. Fiber 状态表达组件实例在时间上的运行阶段；
 3. Service 依赖图决定 Fiber 何时能够运行以及何时需要重启；
-4. Effect 所有权关系决定资源何时以及以什么顺序撤销。
+4. Service 调用绑定决定方法使用哪个调用方空间与哪个提供方依赖快照；
+5. Effect 所有权关系决定资源何时以及以什么顺序撤销。
 
 下面三张并列的小图展示最容易混淆的结构关系：
 
@@ -153,9 +156,9 @@ flowchart LR
 - 手动 `context.extend()` 可以产生新 Context，却不会创建新 Fiber；
 - 服务消费者可以依赖另一分支提供的能力，依赖边不等于父子所有权；
 - Service 变化只负责触发生命周期协调，最终资源清理仍由 Fiber 的 Effect 栈执行；
-- Event 是独立的多对多通信面，但每个监听器注册仍作为 Effect 归订阅方 Fiber 所有。
+- Event 是独立的多对多通信面，但每个监听器注册仍作为 Effect 归订阅方 Fiber 所有；Service 作为显式 `thisArg` 时才会按调用方服务地址过滤。
 
-因此，“空间—时间—依赖—资源”比传统的分层或类继承图更能表达 Nya Core 的核心架构。
+因此，“空间—时间—依赖—调用—资源”比传统的分层或类继承图更能表达 Nya Core 的核心架构。
 
 ## 5. Fiber 生命周期状态机
 
@@ -269,7 +272,42 @@ sequenceDiagram
 
 新的服务变化即使发生在异步清理期间，也只会更新目标快照并追加协调任务，不会与当前卸载并发。最终状态应收敛到最新依赖快照。
 
-### 6.3 资源所有权与清理
+### 6.3 Service 调用方绑定与隔离事件
+
+普通 `provide()` 值保持原始 identity；只有继承 `Service` 的实例在消费者读取时获得调用方绑定 Proxy。调用视图同时保留调用方 Context 与提供方依赖来源，不能把两者压成一个 Fiber：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Consumer as Consumer Context
+    participant Fiber as Consumer Fiber
+    participant Services as ServiceRegistry
+    participant Facade as Service Proxy
+    participant Provider as Provider Fiber
+    participant Events as EventRegistry
+
+    Consumer->>Services: get(name)
+    Services->>Fiber: 读取本轮固定实现快照
+    Fiber-->>Services: ServiceImplementation
+    Services-->>Consumer: 绑定 Consumer 的稳定 Proxy
+    Consumer->>Facade: service.method()
+    Note over Facade,Provider: this.ctx 使用调用方 Context<br/>Service 依赖仍来自 Provider 固定快照
+    Facade->>Events: emit(facade, event)
+    Events->>Events: 比较调用方与订阅方的 Root 和服务标签
+    Events-->>Facade: 只调用同地址局部 Hook 与 global Hook
+```
+
+这种组合维持三个边界：
+
+- Service 不能借用 Consumer 的 `inject` 绕过自身依赖声明；
+- Service 方法通过调用 Context 创建的资源归 Consumer Fiber，提供方长期资源应在构造或 `Service.init` 中创建；
+- Proxy 不临时修改原 Service 实例，因此跨 `await` 的并发调用不会互相覆盖 Context。
+
+组件提供方使用本轮固定依赖快照；Root 提供方没有组件快照，保留 Root 当前地址的实时读取语义。混合 Context 的 `extend()` / `isolate()` 会推进调用方视图并保留提供方依赖来源，安装出的新组件则使用自己的 `inject` 与快照。
+
+Proxy 只支持以普通 prototype 方法参与调用方追踪。箭头函数 class field 词法绑定原实例，原生 `#private` 字段又要求真实实例作为 `this`；两者都不适用于依赖调用方 `this.ctx` 的代理方法。完整决策见 [ADR-0004](./adr/0004-service-caller-context.md)。
+
+### 6.4 资源所有权与清理
 
 Nya Core 的资源安全不是依靠组件自行维护多份退出路径，而是依靠 Fiber 与 Effect 形成的所有权关系：
 
@@ -312,6 +350,8 @@ flowchart TB
 9. 多次 `dispose()` 不能重复释放同一资源，单个清理失败不能阻止其余清理尝试。
 10. Context 派生不能修改父 Context，也不能替换根、Registry、ServiceRegistry、EventRegistry 或 Fiber 等核心引用。
 11. 服务地址必须同时包含 Root、服务名和隔离标签；缺失隔离实现时不能回退默认地址。
+12. Service 调用 Proxy 只能绑定调用方 Context，不能临时修改原 Service 实例；组件提供方的依赖读取使用固定快照，Root 提供方保留实时读取例外。
+13. Service 事件过滤必须同时匹配 Root 与该 Service 名称的隔离标签，`global` Hook 除外。
 
 这些行为分别由[生命周期测试](../packages/core/tests/lifecycle.spec.ts)、[服务依赖测试](../packages/core/tests/service.spec.ts)、[服务隔离测试](../packages/core/tests/isolation.spec.ts)和[事件测试](../packages/core/tests/events.spec.ts)覆盖。完整概念解释见[核心概念指南](./concepts.md)。
 
@@ -323,9 +363,9 @@ flowchart TB
 | --- | --- | --- |
 | Component | 函数、class、对象定义；每次安装独立 Context 与 Fiber | Loader、模块发现与 HMR |
 | Config | 同步 Standard Schema 校验与转换；`fiber.config`、`update()`、`restart()` 与快速更新收敛 | Loader 读写、配置文件持久化与 HMR |
-| Service | `(服务名, 隔离标签)` 严格寻址；Inject 快照按地址驱动消费者启停；最小 `Service` 基类、`init` 与 `check` | Context 拦截、调用方追踪、callable Service 与 mixin |
+| Service | `(服务名, 隔离标签)` 严格寻址；Inject 快照按地址驱动消费者启停；最小 `Service` 基类、调用方 Context Proxy、`init` 与 `check` | Context 拦截、callable Service、`extend` 与 mixin |
 | Effect | CleanupSource、失败回滚、幂等 LIFO 清理和聚合错误 | 可观察的 Effect 诊断树与更完整调试工具 |
-| Event | 生命周期绑定、Context 过滤和五种派发模式 | Service 作为 `thisArg` 时结合调用方隔离标签过滤 |
+| Event | 生命周期绑定、Context 过滤和五种派发模式；Service `thisArg` 按调用方隔离地址过滤 | 更完整的运行时诊断事件 |
 | 包边界 | 当前只有 `@nya/core` 和 playground | `@nya/loader`、`@nya/hmr` 等外围包 |
 
 目标语义、非目标和建议的后续包见[核心设计](./design.md)。其中标记为 Proposed 的内容应在图中使用虚线或 `«proposed»`，并与本文的 Current 视图分开维护。

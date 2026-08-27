@@ -7,6 +7,8 @@ import type { Component, ResolvedInject } from './component.js'
 import type { ComponentRuntime } from './registry.js'
 import type { DependencySnapshot, ServiceAddress } from './service.js'
 import {
+  fiberGetServiceImplementation,
+  fiberGetServiceSource,
   serviceCapture,
   serviceInit,
   serviceSubscribe,
@@ -84,6 +86,10 @@ export class Fiber implements PromiseLike<void> {
 
   /** 组件入口和清理代码当前固定使用的快照。 */
   #activeSnapshot: DependencySnapshot | undefined
+
+  /** 每次成功进入启动流程都会使用新的 run 身份，防止旧 facade 复用新快照。 */
+  #runCounter = 0
+  #activeRun: number | undefined
 
   /** 当前运行固定使用的配置版本；入口闭包持有对应的配置值。 */
   #activeConfigVersion: number | undefined
@@ -205,13 +211,17 @@ export class Fiber implements PromiseLike<void> {
     this.#scheduleReconcile()
   }
 
-  /** Context Proxy 只能从当前运行快照读取已声明的依赖。 */
-  getInjected(name: string, address: ServiceAddress) {
+  /** 包内读取当前运行快照中的实现，并强制校验捕获时的服务地址。 */
+  [fiberGetServiceImplementation](
+    name: string,
+    address: ServiceAddress,
+    snapshot: DependencySnapshot | undefined,
+  ) {
     if (!this.inject.has(name)) {
       throw new Error(`cannot get service "${name}" without inject`)
     }
 
-    const implementation = this.#activeSnapshot?.services.get(name)
+    const implementation = snapshot?.services.get(name)
     if (
       !implementation
       || implementation.address.name !== address.name
@@ -222,7 +232,15 @@ export class Fiber implements PromiseLike<void> {
       )
     }
 
-    return implementation.value
+    return implementation
+  }
+
+  /** 返回当前 Provider run 的不可伪造内部身份与固定依赖快照。 */
+  [fiberGetServiceSource]() {
+    return {
+      run: this.#activeRun,
+      snapshot: this.#activeSnapshot,
+    }
   }
 
   /** 创建归当前一轮运行所有的 Effect。 */
@@ -487,6 +505,7 @@ export class Fiber implements PromiseLike<void> {
 
     this.#runEffects = new DisposableStack()
     this.#activeSnapshot = snapshot
+    this.#activeRun = ++this.#runCounter
     this.#activeConfigVersion = configVersion
     this.#setState(FiberState.LOADING)
     this.error = undefined
@@ -524,6 +543,7 @@ export class Fiber implements PromiseLike<void> {
       this.error = failure
       this.#runEffects = undefined
       this.#activeSnapshot = undefined
+      this.#activeRun = undefined
       this.#activeConfigVersion = undefined
       this.#failedTarget = this.#getTarget(snapshot, configVersion)
       this.#setState(FiberState.FAILED)
@@ -560,6 +580,7 @@ export class Fiber implements PromiseLike<void> {
       // 清理函数执行期间仍能读取旧 snapshot；全部清理结束后才解除固定。
       this.#runEffects = undefined
       this.#activeSnapshot = undefined
+      this.#activeRun = undefined
       this.#activeConfigVersion = undefined
     }
 

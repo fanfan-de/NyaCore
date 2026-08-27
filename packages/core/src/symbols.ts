@@ -16,6 +16,21 @@ export const serviceCapture = Symbol('@nya/core/service.capture')
 /** Fiber 订阅服务地址变化的包内协议，不从公共入口导出。 */
 export const serviceSubscribe = Symbol('@nya/core/service.subscribe')
 
+/** ServiceRegistry 从 Fiber 固定快照读取实现的包内协议。 */
+export const fiberGetServiceImplementation = Symbol(
+  '@nya/core/fiber.get-service-implementation',
+)
+
+/** ServiceRegistry 捕获 Fiber 当前 Provider run 身份的包内协议。 */
+export const fiberGetServiceSource = Symbol(
+  '@nya/core/fiber.get-service-source',
+)
+
+/** Service 按调用方服务地址过滤事件的包内协议，不从公共入口导出。 */
+export const serviceContextFilter = Symbol(
+  '@nya/core/service.context-filter',
+)
+
 /** 事件 thisArg 可以实现本协议，按订阅方 Context 过滤局部监听器。 */
 export const contextFilter: unique symbol = Symbol.for(
   '@nya/core/context.filter',

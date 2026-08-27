@@ -14,7 +14,10 @@ import type {
 import { Fiber } from './fiber.js'
 import type { Component, Inject } from './component.js'
 import { Registry } from './registry.js'
-import { ServiceRegistry } from './service.js'
+import {
+  inheritServiceCallFrame,
+  ServiceRegistry,
+} from './service.js'
 import type { IsolationLabel } from './symbols.js'
 import {
   contextFilter,
@@ -33,6 +36,7 @@ const protectedProperties = new Set<PropertyKey>([
 ])
 
 const reservedProperties = new Set(['prototype', 'then'])
+const contextProxies = new WeakMap<Context, Context>()
 
 function isSpecialProperty(property: string) {
   return reservedProperties.has(property)
@@ -85,7 +89,9 @@ const contextProxyHandler: ProxyHandler<Context> = {
       return Reflect.has(target, property)
     }
 
-    const context = target as Context
+    // Proxy 的 has trap 没有 receiver；用创建时登记的代理恢复精确 Context，
+    // 让 WeakMap 中的 Service 调用帧也能参与 `name in context` 判断。
+    const context = contextProxies.get(target) ?? target
     return context.root.services.has(context, property)
   },
 }
@@ -108,6 +114,7 @@ export class Context {
     // 根和派生 Context 都通过同一 handler 提供服务属性访问。root 必须指向
     // Proxy 本身，确保所有后续派生 Context 共享同一个可观察运行时根节点。
     const proxy = new Proxy(this, contextProxyHandler) as this
+    contextProxies.set(this, proxy)
 
     Object.defineProperty(this, contextIsolations, {
       configurable: false,
@@ -155,7 +162,10 @@ export class Context {
       )
     }
 
-    return new Proxy(child, contextProxyHandler)
+    const context = new Proxy(child, contextProxyHandler) as this
+    contextProxies.set(child, context)
+    inheritServiceCallFrame(this, context)
+    return context
   }
 
   /** 为一个服务名派生严格隔离的解析空间；原 Context 保持不变。 */

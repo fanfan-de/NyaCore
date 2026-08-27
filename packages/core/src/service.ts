@@ -7,9 +7,12 @@ import { FiberState } from './fiber.js'
 import type { ResolvedInject } from './component.js'
 import type { IsolationLabel } from './symbols.js'
 import {
+  contextFilter,
   contextIsolations,
+  fiberGetServiceImplementation,
   serviceCapture,
   serviceCheck,
+  serviceContextFilter,
   serviceInit,
   serviceSubscribe,
 } from './symbols.js'
@@ -41,6 +44,150 @@ interface ServiceSlot {
   readonly address: ServiceAddress
   readonly consumers: Set<Fiber>
   implementation?: ServiceImplementation
+}
+
+/** Service facade 中 caller 与 provider 两套语义的内部绑定。 */
+interface ServiceCallFrame {
+  readonly callerContext: Context
+  readonly providerContext: Context
+  readonly implementation: ServiceImplementation<Service>
+}
+
+const serviceCallFrames = new WeakMap<Context, ServiceCallFrame>()
+const serviceFacades = new WeakMap<
+  ServiceImplementation,
+  WeakMap<Context, Service>
+>()
+const serviceFacadeImplementations = new WeakMap<
+  Service,
+  ServiceImplementation<Service>
+>()
+
+/** Context.extend() 保留 provider 来源，并把派生 Context 推进为新的 caller 视图。 */
+export function inheritServiceCallFrame(parent: Context, child: Context) {
+  const frame = serviceCallFrames.get(parent)
+  if (!frame) return
+  serviceCallFrames.set(child, {
+    ...frame,
+    callerContext: child,
+  })
+}
+
+/** 安装独立组件时清除从调用方 Context 复制来的服务调用帧。 */
+export function clearServiceCallFrame(context: Context) {
+  serviceCallFrames.delete(context)
+}
+
+/** 只有 prototype 数据方法参与稳定绑定；实例函数字段与 getter 结果保持原值。 */
+function isPrototypeMethod(
+  target: Service,
+  property: PropertyKey,
+  value: Function,
+) {
+  if (Reflect.getOwnPropertyDescriptor(target, property)) return false
+
+  let prototype = Reflect.getPrototypeOf(target)
+  while (prototype) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(prototype, property)
+    if (descriptor) {
+      return 'value' in descriptor && descriptor.value === value
+    }
+    prototype = Reflect.getPrototypeOf(prototype)
+  }
+  return false
+}
+
+function bindServiceImplementation(
+  callerContext: Context,
+  implementation: ServiceImplementation,
+) {
+  const value = implementation.value
+  if (!(value instanceof Service)) return value
+  if (implementation.providerContext === callerContext) return value
+
+  let callers = serviceFacades.get(implementation)
+  if (!callers) {
+    callers = new WeakMap()
+    serviceFacades.set(implementation, callers)
+  }
+
+  const cached = callers.get(callerContext)
+  if (cached) return cached
+
+  const serviceContext = callerContext.extend()
+  serviceCallFrames.set(serviceContext, {
+    callerContext,
+    providerContext: implementation.providerContext,
+    implementation: implementation as ServiceImplementation<Service>,
+  })
+
+  const contextDescriptor = Reflect.getOwnPropertyDescriptor(value, 'ctx')
+  if (!contextDescriptor || !contextDescriptor.configurable) {
+    throw new TypeError(
+      'cannot bind a Service whose Context property is not configurable',
+    )
+  }
+
+  const methods = new WeakMap<Function, Function>()
+  let facade!: Service
+  facade = new Proxy(value, {
+    get(target, property, receiver) {
+      if (property === 'ctx') return serviceContext
+
+      const result = Reflect.get(target, property, receiver)
+      if (
+        property === 'constructor'
+        || typeof result !== 'function'
+        || !isPrototypeMethod(target, property, result)
+      ) {
+        return result
+      }
+
+      let bound = methods.get(result)
+      if (!bound) {
+        bound = (...args: unknown[]) => Reflect.apply(result, facade, args)
+        methods.set(result, bound)
+      }
+      return bound
+    },
+    set(target, property, next, receiver) {
+      if (property === 'ctx') {
+        throw new TypeError('cannot replace the Context of a Service facade')
+      }
+      return Reflect.set(target, property, next, receiver)
+    },
+    defineProperty(target, property, descriptor) {
+      if (property === 'ctx') {
+        throw new TypeError('cannot redefine the Context of a Service facade')
+      }
+      return Reflect.defineProperty(target, property, descriptor)
+    },
+    deleteProperty(target, property) {
+      if (property === 'ctx') {
+        throw new TypeError('cannot delete the Context of a Service facade')
+      }
+      return Reflect.deleteProperty(target, property)
+    },
+    getOwnPropertyDescriptor(target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(target, property)
+      if (property !== 'ctx' || !descriptor) return descriptor
+      return {
+        configurable: descriptor.configurable,
+        enumerable: descriptor.enumerable,
+        value: serviceContext,
+        writable: false,
+      }
+    },
+    preventExtensions() {
+      return false
+    },
+  })
+  serviceFacadeImplementations.set(
+    facade,
+    implementation as ServiceImplementation<Service>,
+  )
+  callers.set(callerContext, facade)
+  return facade
 }
 
 /**
@@ -95,9 +242,28 @@ export class ServiceRegistry {
     return slot
   }
 
+  /** 解开嵌套 Service 调用 Context，找到最终负责依赖权限与快照的 Context。 */
+  #getDependencyContext(
+    context: Context,
+    seen = new Set<Context>(),
+  ): Context {
+    const frame = serviceCallFrames.get(context)
+    if (!frame) return context
+    if (seen.has(context)) {
+      throw new Error('cyclic Service provider Context')
+    }
+
+    seen.add(context)
+    return this.#getDependencyContext(frame.providerContext, seen)
+  }
+
   /** 当前 Context 的服务地址是否已经被依赖声明或服务注册认识。 */
   has(context: Context, name: string) {
-    const address = this.#resolveAddress(context, name)
+    const frame = serviceCallFrames.get(context)
+    const source = frame
+      ? this.#getDependencyContext(frame.providerContext)
+      : context
+    const address = this.#resolveAddress(source, name)
     return this.#slots.get(name)?.has(address.label) ?? false
   }
 
@@ -244,20 +410,54 @@ export class ServiceRegistry {
 
   /** Context Proxy 的读取入口：根读取实时值，普通 Fiber 读取本轮固定快照。 */
   get(context: Context, name: string): unknown {
+    const frame = serviceCallFrames.get(context)
+    if (frame) {
+      const provider = this.#getDependencyContext(frame.providerContext)
+      let implementation: ServiceImplementation | undefined
+
+      if (provider.fiber.isRoot) {
+        implementation = this.#getSlot(provider, name).implementation
+        if (implementation?.owner.state !== FiberState.ACTIVE) return
+      } else {
+        implementation = provider.fiber[fiberGetServiceImplementation](
+          name,
+          this.#resolveAddress(provider, name),
+        )
+      }
+
+      return implementation
+        ? bindServiceImplementation(frame.callerContext, implementation)
+        : undefined
+    }
+
     const slot = this.#getSlot(context, name)
     const implementation = slot.implementation
 
     // 提供方在自己的构造、初始化和清理代码中可以访问自己刚提供的服务。
-    if (implementation?.owner === context.fiber) {
+    if (implementation?.providerContext === context) {
       return implementation.value
     }
 
     if (context.fiber.isRoot) {
       if (implementation?.owner.state !== FiberState.ACTIVE) return
-      return implementation.value
+      return bindServiceImplementation(context, implementation)
     }
 
-    return context.fiber.getInjected(name, slot.address)
+    return bindServiceImplementation(
+      context,
+      context.fiber[fiberGetServiceImplementation](name, slot.address),
+    )
+  }
+
+  /** Service 事件只对同一 Root、同一调用方服务地址中的监听器可见。 */
+  [serviceContextFilter](source: Context, target: Context, name: string) {
+    if (source.root.services !== this || target.root.services !== this) {
+      return false
+    }
+
+    const sourceAddress = this.#resolveAddress(source, name)
+    const targetAddress = this.#resolveAddress(target, name)
+    return sourceAddress.label === targetAddress.label
   }
 
   #notify(slot: ServiceSlot) {
@@ -268,8 +468,8 @@ export class ServiceRegistry {
 }
 
 /**
- * 把 class 实例注册成服务的最小便利基类。
- * callable、extend、intercept 和调用方 Context 追踪将在空间组合阶段加入。
+ * 把 class 实例注册成服务，并让消费者通过绑定调用方 Context 的 facade 使用它。
+ * callable、extend、intercept 和 mixin 仍属于后续协议。
  */
 export abstract class Service {
   static readonly init: typeof serviceInit = serviceInit
@@ -291,6 +491,16 @@ export abstract class Service {
       name,
       this,
       typeof check === 'function' ? () => check.call(this) : undefined,
+    )
+  }
+
+  /** 事件范围跟随 facade 的调用方 Context，而不是底层 Provider 地址。 */
+  [contextFilter](context: Context) {
+    const implementation = serviceFacadeImplementations.get(this)
+    return this.ctx.root.services[serviceContextFilter](
+      this.ctx,
+      context,
+      implementation?.address.name ?? this.name,
     )
   }
 

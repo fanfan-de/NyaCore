@@ -4,6 +4,7 @@ import type { Context } from './context.js'
 import { Fiber } from './fiber.js'
 import type { Component } from './component.js'
 import { resolveComponent } from './component.js'
+import { clearServiceCallFrame } from './service.js'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 
 /** 同一个 Component 定义在 Registry 中共享的 Runtime 元数据。 */
@@ -40,6 +41,9 @@ export class Registry {
     }
 
     const context = parent.extend()
+    // Service 方法中的 parent 可能是混合调用 Context。新组件拥有独立的
+    // inject 与依赖快照，不能继续沿用 Service Provider 的调用帧。
+    clearServiceCallFrame(context)
     let fiber!: Fiber
     const detach = () => {
       runtime.fibers.delete(fiber)
