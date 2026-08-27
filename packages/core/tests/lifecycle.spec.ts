@@ -270,6 +270,48 @@ describe('component lifecycle', () => {
     expect(app.registry.get(component)).toBeUndefined()
   })
 
+  it('preserves unique failures from partially overlapping unload phases', async () => {
+    const app = new Context()
+    const sharedError = new Error('shared cleanup failure')
+    const otherError = new Error('other cleanup failure')
+    app.provide('overlapping-cleanup-a', {})
+    app.provide('overlapping-cleanup-b', {})
+
+    const first = app.inject(['overlapping-cleanup-a'], () => {
+      return () => {
+        throw sharedError
+      }
+    })
+    const second = app.installComponent({
+      inject: ['overlapping-cleanup-b'],
+      apply(context) {
+        context.effect(() => () => {
+          throw sharedError
+        })
+        return () => {
+          throw otherError
+        }
+      },
+    })
+    await Promise.all([first, second])
+
+    const failure = await app.fiber.restart().catch(error => error)
+    const flatten = (error: unknown): unknown[] => {
+      return error instanceof AggregateError
+        ? error.errors.flatMap(flatten)
+        : [error]
+    }
+    const failures = flatten(failure)
+
+    expect(failures.filter(error => Object.is(error, sharedError)))
+      .toHaveLength(1)
+    expect(failures.filter(error => Object.is(error, otherError)))
+      .toHaveLength(1)
+    expect(first.state).toBe(FiberState.DISPOSED)
+    expect(second.state).toBe(FiberState.DISPOSED)
+    expect(app.fiber.state).toBe(FiberState.ACTIVE)
+  })
+
   it('reports cleanup failure when disposed during asynchronous startup', async () => {
     const app = new Context()
     const error = new Error('cleanup after startup failed')

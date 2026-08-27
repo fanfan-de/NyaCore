@@ -9,6 +9,7 @@ import type { IsolationLabel } from './symbols.js'
 import {
   contextFilter,
   contextIsolations,
+  fiberBeforeUnload,
   fiberGetServiceImplementation,
   fiberGetServiceSource,
   serviceCapture,
@@ -63,11 +64,16 @@ interface ServiceDependencySource {
 
 /** 不暴露到公共实现对象上的调用绑定与跨 Fiber 生命周期状态。 */
 interface ServiceImplementationState {
-  readonly source: ServiceDependencySource
+  source: ServiceDependencySource
   valid: boolean
-  sourceInvalidating: boolean
+  readable: boolean
   ownerDisposing: boolean
+  finalized: boolean
+  invalidationTask?: Promise<void>
+  finalizationTask?: Promise<void>
   detachSource?: Disposer
+  detachOwner?: Disposer
+  disposeOwner?: Disposer
 }
 
 const serviceCallFrames = new WeakMap<Context, ServiceCallFrame>()
@@ -83,6 +89,28 @@ const serviceImplementationStates = new WeakMap<
   ServiceImplementation,
   ServiceImplementationState
 >()
+
+function assertServiceFacadeReadable(implementation: ServiceImplementation) {
+  if (!serviceImplementationStates.get(implementation)?.readable) {
+    throw new Error('cannot access Service facade from inactive context')
+  }
+}
+
+/** 只有实例自己的原始 Context 与规范地址才能安全复用 raw Service。 */
+function canReuseProviderValue(
+  callerContext: Context,
+  implementation: ServiceImplementation,
+) {
+  if (implementation.providerContext !== callerContext) return false
+
+  const value = implementation.value
+  if (!(value instanceof Service)) return true
+  const descriptor = Reflect.getOwnPropertyDescriptor(value, 'ctx')
+  return value.name === implementation.address.name
+    && !!descriptor
+    && 'value' in descriptor
+    && descriptor.value === callerContext
+}
 
 /** Context.extend() 保留 provider 来源，并把派生 Context 推进为新的 caller 视图。 */
 export function inheritServiceCallFrame(parent: Context, child: Context) {
@@ -124,7 +152,9 @@ function bindServiceImplementation(
 ) {
   const value = implementation.value
   if (!(value instanceof Service)) return value
-  if (implementation.providerContext === callerContext) return value
+  // 精确 Provider Context 只为实例自己的规范名称复用原对象。若同一实例
+  // 另以 alias 或其他隔离地址注册，仍需 facade 携带真实地址供事件过滤。
+  if (canReuseProviderValue(callerContext, implementation)) return value
 
   let callers = serviceFacades.get(implementation)
   if (!callers) {
@@ -153,6 +183,7 @@ function bindServiceImplementation(
   let facade!: Service
   facade = new Proxy(value, {
     get(target, property, receiver) {
+      assertServiceFacadeReadable(implementation)
       if (property === 'ctx') return serviceContext
 
       const result = Reflect.get(target, property, receiver)
@@ -166,30 +197,37 @@ function bindServiceImplementation(
 
       let bound = methods.get(result)
       if (!bound) {
-        bound = (...args: unknown[]) => Reflect.apply(result, facade, args)
+        bound = (...args: unknown[]) => {
+          assertServiceFacadeReadable(implementation)
+          return Reflect.apply(result, facade, args)
+        }
         methods.set(result, bound)
       }
       return bound
     },
     set(target, property, next, receiver) {
+      assertServiceFacadeReadable(implementation)
       if (property === 'ctx') {
         throw new TypeError('cannot replace the Context of a Service facade')
       }
       return Reflect.set(target, property, next, receiver)
     },
     defineProperty(target, property, descriptor) {
+      assertServiceFacadeReadable(implementation)
       if (property === 'ctx') {
         throw new TypeError('cannot redefine the Context of a Service facade')
       }
       return Reflect.defineProperty(target, property, descriptor)
     },
     deleteProperty(target, property) {
+      assertServiceFacadeReadable(implementation)
       if (property === 'ctx') {
         throw new TypeError('cannot delete the Context of a Service facade')
       }
       return Reflect.deleteProperty(target, property)
     },
     getOwnPropertyDescriptor(target, property) {
+      assertServiceFacadeReadable(implementation)
       const descriptor = Reflect.getOwnPropertyDescriptor(target, property)
       if (property !== 'ctx' || !descriptor) return descriptor
       return {
@@ -199,8 +237,21 @@ function bindServiceImplementation(
         writable: false,
       }
     },
+    has(target, property) {
+      assertServiceFacadeReadable(implementation)
+      return Reflect.has(target, property)
+    },
+    ownKeys(target) {
+      assertServiceFacadeReadable(implementation)
+      return Reflect.ownKeys(target)
+    },
     preventExtensions() {
+      assertServiceFacadeReadable(implementation)
       return false
+    },
+    setPrototypeOf(target, prototype) {
+      assertServiceFacadeReadable(implementation)
+      return Reflect.setPrototypeOf(target, prototype)
     },
   })
   serviceFacadeImplementations.set(
@@ -268,7 +319,7 @@ export class ServiceRegistry {
     const frame = serviceCallFrames.get(context)
     if (frame) {
       const state = serviceImplementationStates.get(frame.implementation)
-      if (!state) throw new Error('invalid Service call frame')
+      if (!state?.readable) throw new Error('inactive Service call frame')
       return state.source
     }
 
@@ -306,33 +357,102 @@ export class ServiceRegistry {
     return !!state?.valid && this.#isSourceCurrent(state.source)
   }
 
-  /** 来源 Provider 清理时先让跨所有者实现失效，并等待其消费者卸载。 */
-  async #invalidateFromSource(
+  /** source 或 owner 卸载的第一阶段：停止捕获新消费者并等待旧消费者清理。 */
+  #beginInvalidation(
     slot: ServiceSlot,
     implementation: ServiceImplementation,
     state: ServiceImplementationState,
   ) {
-    if (
-      state.ownerDisposing
-      || state.sourceInvalidating
-      || !state.valid
-    ) {
-      return
+    if (state.invalidationTask) return state.invalidationTask
+    if (state.ownerDisposing) {
+      return state.invalidationTask = Promise.resolve(state.disposeOwner?.())
     }
 
-    state.sourceInvalidating = true
     state.valid = false
-    if (slot.implementation !== implementation) return
+    const consumers = slot.implementation === implementation
+      ? this.#notify(slot)
+      : []
+    const task = (async () => {
+      const results = await Promise.allSettled(
+        consumers.map(fiber => fiber.awaitStable()),
+      )
+      const errors = results.flatMap(result => {
+        return result.status === 'rejected' ? [result.reason] : []
+      })
+      if (errors.length === 1) throw errors[0]
+      if (errors.length > 1) {
+        throw new AggregateError(
+          errors,
+          'multiple service consumers failed to unload',
+        )
+      }
+    })()
+    state.invalidationTask = task
+    void task.catch(() => {})
+    return task
+  }
 
-    const consumers = this.#notify(slot)
-    await Promise.allSettled(
-      consumers.map(fiber => fiber.awaitStable()),
-    )
+  /** 第二阶段：所有消费者稳定后关闭 frame，并解除 slot 与两端 hook。 */
+  #finalizeInvalidation(
+    slot: ServiceSlot,
+    implementation: ServiceImplementation,
+    state: ServiceImplementationState,
+  ) {
+    if (state.finalizationTask) return state.finalizationTask
+
+    const task = (async () => {
+      await state.invalidationTask?.catch(() => {})
+      if (state.finalized) return
+
+      state.finalized = true
+      state.readable = false
+      if (state.source.snapshot !== undefined) {
+        state.source = {
+          context: state.source.context,
+          snapshot: undefined,
+          run: state.source.run,
+        }
+      }
+
+      const crossOwner = implementation.owner !== state.source.context.fiber
+      if (crossOwner || state.ownerDisposing) {
+        this.#removeImplementation(slot, implementation, false)
+      }
+      await state.detachSource?.()
+      await state.detachOwner?.()
+
+      // 跨所有者注册不会随来源 Fiber 自动清理；关闭 slot 后主动结束
+      // caller-owned 注册 Effect，释放闭包但不清理 caller 的其他资源。
+      if (crossOwner && !state.ownerDisposing) {
+        await state.disposeOwner?.()
+      }
+    })()
+    state.finalizationTask = task
+    void task.catch(() => {})
+    return task
+  }
+
+  /** 按实现身份移除 slot，并从 owner 反向索引解除，不误删后继实现。 */
+  #removeImplementation(
+    slot: ServiceSlot,
+    implementation: ServiceImplementation,
+    notify = true,
+  ) {
+    if (slot.implementation !== implementation) return []
+
+    slot.implementation = undefined
+    const owned = this.#owned.get(implementation.owner)
+    owned?.delete(slot)
+    if (owned?.size === 0) this.#owned.delete(implementation.owner)
+    return notify ? this.#notify(slot) : []
   }
 
   /** 当前 Context 的服务地址是否已经被依赖声明或服务注册认识。 */
   has(context: Context, name: string) {
     const frame = serviceCallFrames.get(context)
+    if (frame && !serviceImplementationStates.get(frame.implementation)?.readable) {
+      return false
+    }
     const source = frame
       ? serviceImplementationStates.get(frame.implementation)?.source.context
       : context
@@ -355,8 +475,12 @@ export class ServiceRegistry {
       throw new TypeError('invalid service name: expected a non-empty string')
     }
 
-    return context.fiber.effect(() => {
+    let state: ServiceImplementationState | undefined
+    let registeredSlot: ServiceSlot | undefined
+    let registeredImplementation: ServiceImplementation<Value> | undefined
+    const disposeOwner = context.fiber.effect(() => {
       const slot = this.#getSlot(context, name)
+      registeredSlot = slot
       const current = slot.implementation
       if (current) {
         const owner = current.owner.name === '<root>'
@@ -375,29 +499,46 @@ export class ServiceRegistry {
         owner: context.fiber,
         check,
       }
+      registeredImplementation = implementation
       const source = this.#getDependencySource(context)
       if (!this.#isSourceCurrent(source, true)) {
         throw new Error('inactive Service provider Context')
       }
-      const state: ServiceImplementationState = {
+      state = {
         source,
         valid: true,
-        sourceInvalidating: false,
+        readable: true,
         ownerDisposing: false,
+        finalized: false,
       }
       serviceImplementationStates.set(implementation, state)
 
-      // 资源仍由调用方 Fiber 拥有；来源 Fiber 只登记一条失效边，确保其
-      // Provider run 清理前先让依赖该实现的消费者完成卸载。
+      // source 与实际 owner 都保存同一两阶段 barrier。任一端先卸载都会
+      // 等待消费者，另一端并发卸载时复用同一任务，不依赖 Effect LIFO。
+      const invalidate = () => this.#beginInvalidation(
+        slot,
+        implementation,
+        state!,
+      )
+      const finalize = () => this.#finalizeInvalidation(
+        slot,
+        implementation,
+        state!,
+      )
+      state.detachSource = source.context.fiber[fiberBeforeUnload](
+        invalidate,
+        finalize,
+      )
       if (source.context.fiber !== context.fiber) {
-        state.detachSource = source.context.fiber.effect(
-          () => () => this.#invalidateFromSource(
-            slot,
-            implementation,
-            state,
-          ),
-          `service source(${JSON.stringify(name)})`,
-        )
+        try {
+          state.detachOwner = context.fiber[fiberBeforeUnload](
+            invalidate,
+            finalize,
+          )
+        } catch (error) {
+          state.detachSource()
+          throw error
+        }
       }
 
       slot.implementation = implementation
@@ -415,25 +556,115 @@ export class ServiceRegistry {
       }
 
       return async () => {
-        state.ownerDisposing = true
-        // owner 主动清理时先撤销来源失效边。回调看到 ownerDisposing 后
-        // 直接返回；来源清理已经开始时则不能反向等待自己，避免循环等待。
-        if (!state.sourceInvalidating) await state.detachSource?.()
-        state.valid = false
+        state!.ownerDisposing = true
+        // 两阶段失效已接管时，内部 Effect disposer 不能反向等待当前 Fiber
+        // 的 barrier；公开句柄会在外层统一 join invalidation 与 finalize。
+        if (state!.invalidationTask) {
+          if (state!.finalized) {
+            this.#removeImplementation(slot, implementation, false)
+          }
+          return
+        }
 
-        // 只允许创建本实现的 disposer 删除本实现，避免旧 disposer 误删后继值。
-        if (slot.implementation !== implementation) return
+        state!.valid = false
 
-        slot.implementation = undefined
-        owned?.delete(slot)
-        if (owned?.size === 0) this.#owned.delete(context.fiber)
-
-        const consumers = this.#notify(slot)
-        await Promise.allSettled(
+        const consumers = this.#removeImplementation(
+          slot,
+          implementation,
+          true,
+        )
+        const results = await Promise.allSettled(
           consumers.map(fiber => fiber.awaitStable()),
         )
+
+        state!.readable = false
+        state!.finalized = true
+        if (state!.source.snapshot !== undefined) {
+          state!.source = {
+            context: state!.source.context,
+            snapshot: undefined,
+            run: state!.source.run,
+          }
+        }
+        // 消费者完全退出后才撤销两端 hook；并发 source/owner 卸载时
+        // beginInvalidation 会等待当前 disposeOwner。
+        await state!.detachSource?.()
+        await state!.detachOwner?.()
+
+        const errors = results.flatMap(result => {
+          return result.status === 'rejected' ? [result.reason] : []
+        })
+        if (errors.length === 1) throw errors[0]
+        if (errors.length > 1) {
+          throw new AggregateError(
+            errors,
+            'multiple service consumers failed to unload',
+          )
+        }
       }
     }, `ctx.provide(${JSON.stringify(name)})`)
+    if (state) state.disposeOwner = disposeOwner
+
+    // 内部 Effect disposer 需要避免 finalizer 自等待；公开句柄仍保持普通
+    // provide() 的完成语义：消费者稳定、slot 释放且错误完整传播后才结束。
+    let publicDisposeTask: Promise<void> | undefined
+    return () => {
+      if (publicDisposeTask) return publicDisposeTask
+
+      publicDisposeTask = (async () => {
+        const noFailure = Symbol('no failure')
+        let ownerFailure: unknown = noFailure
+        let invalidationFailure: unknown = noFailure
+        let finalizationFailure: unknown = noFailure
+
+        try {
+          await disposeOwner()
+        } catch (error) {
+          ownerFailure = error
+        }
+
+        try {
+          await state?.invalidationTask
+        } catch (error) {
+          invalidationFailure = error
+        }
+
+        if (state && registeredSlot && registeredImplementation) {
+          try {
+            await this.#finalizeInvalidation(
+              registeredSlot,
+              registeredImplementation,
+              state,
+            )
+          } catch (error) {
+            finalizationFailure = error
+          }
+        }
+
+        const failures: unknown[] = []
+        for (const failure of [
+          ownerFailure,
+          invalidationFailure,
+          finalizationFailure,
+        ]) {
+          if (
+            failure !== noFailure
+            && !failures.some(current => Object.is(current, failure))
+          ) {
+            failures.push(failure)
+          }
+        }
+        if (failures.length === 1) throw failures[0]
+        if (failures.length > 1) {
+          throw new AggregateError(
+            failures,
+            'service removal phases failed',
+          )
+        }
+      })()
+      void publicDisposeTask.catch(() => {})
+      return publicDisposeTask
+    }
   }
 
   /** 为一次组件运行捕获全部必需服务；任意一项不可用时返回 undefined。 */
@@ -517,7 +748,11 @@ export class ServiceRegistry {
     const frame = serviceCallFrames.get(context)
     if (frame) {
       const state = serviceImplementationStates.get(frame.implementation)
-      if (!state) throw new Error('invalid Service call frame')
+      if (!state?.readable) {
+        throw new Error(
+          `cannot get required service "${name}" in inactive context`,
+        )
+      }
       const source = state.source
       let implementation: ServiceImplementation | undefined
 
@@ -526,6 +761,10 @@ export class ServiceRegistry {
         if (
           implementation
           && !this.#isImplementationAvailable(implementation)
+          && !(
+            source.context.fiber.state === FiberState.UNLOADING
+            && serviceImplementationStates.get(implementation)?.readable
+          )
         ) {
           return
         }
@@ -548,7 +787,7 @@ export class ServiceRegistry {
     // 同一 Provider Fiber 可以在构造、初始化和清理期间读取自己的服务。
     // 精确提供 Context 复用原实例，其他派生 Context 仍获得独立 caller facade。
     if (implementation?.owner === context.fiber) {
-      if (implementation.providerContext === context) {
+      if (canReuseProviderValue(context, implementation)) {
         return implementation.value
       }
       if (!serviceImplementationStates.get(implementation)?.valid) return

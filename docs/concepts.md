@@ -296,6 +296,8 @@ ctx.inject(['database'], (ctx) => {
 
 缺少任意必需服务时，Fiber 保持 `PENDING`，入口不会执行。服务提供方进入 `ACTIVE` 后，消费者捕获一份固定服务快照并启动；服务移除或实现发生变化时，消费者先使用旧快照完成清理，再用最新快照重新启动或回到 `PENDING`。
 
+`provide()` 返回幂等 disposer；等待它会等待当前消费者完成清理并释放该服务 slot。不要在某个消费者自己的 cleanup 中反向 `await` 它正在消费的服务 disposer：服务移除正在等待这个消费者，而消费者又等待服务移除，会形成循环依赖。需要协调额外资源时，应让它们归同一 Effect 所有，或从不依赖该服务的外层发起移除。
+
 普通组件只能通过 `ctx.database` 或 `ctx.get('database')` 读取已经声明在 `inject` 中的服务；未声明访问会抛错。根 Context 可以读取当前有效服务，提供方也可以在自己的初始化过程中读取自己刚注册的服务。
 
 运行时会把数组或对象形式的 `inject` 复制为每次安装独有的只读名称集合；对象形式当前只读取键，配置值尚无运行时含义。`provide()`、显式 `get()`、属性读取、依赖捕获和变化通知都按照调用 Context 的 `(服务名, 隔离标签)` 定位同一个 slot；同一地址只能注册一个实现，不同标签则可以同时提供同名服务。
@@ -308,7 +310,7 @@ Core 已提供最小 `Service` 基类。子类可以通过 `static provide` 或�
 
 ### 5.7 Service 调用方 Context
 
-消费者从 Context 属性或 `get()` 取得 `Service` 实例时，运行时返回绑定到本次调用 Context 的 Proxy 视图。普通 prototype 方法中的 `this.ctx` 因而是从调用方派生的混合 Context，而 Service 的依赖读取仍受提供方 Fiber 本轮固定快照约束：Service 不能借用消费者的 `inject` 绕过自己的依赖声明，也不会在同一轮调用中实时切换依赖实现。
+消费者从 Context 属性或 `get()` 取得 `Service` 实例时，运行时返回绑定到本次调用 Context 的 Proxy 视图。普通 prototype 方法中的 `this.ctx` 因而是从调用方派生的混合 Context，而 Service 的依赖读取固定到创建该实现的 Provider run 与依赖快照：Service 不能借用消费者的 `inject` 绕过自己的依赖声明，旧 facade 也不会在 Provider 重启后切换到新快照；该实现失效并完成消费者清理后，旧 facade 按 inactive-context 语义拒绝继续调用。
 
 ```ts
 class DatabaseService extends Service {
@@ -328,7 +330,9 @@ const consumer = app.installComponent({
 })
 ```
 
-方法中的 `this.ctx` 是从调用方派生、同时带有提供方依赖来源的混合 Context，不保证与消费者持有的 Context 引用相等；它的 `root`、`fiber`、隔离视图和资源所有权来自调用方，但服务属性、`get()` 与 `name in context` 按提供方依赖地址解释。同一 Context 对同一个服务实现重复读取会得到稳定视图；不同调用 Context 得到不同视图，但共享同一个提供方实例。绑定不会临时修改原 Service 的 `ctx`，因此同步嵌套调用和跨 `await` 的并发调用不会互相覆盖。Service 方法通过该调用 Context 创建的 Effect、监听器或子组件归调用方 Fiber；需要与提供方同寿命的资源应在构造或 `Service.init` 中创建。
+方法中的 `this.ctx` 是从调用方派生、同时带有提供方依赖来源的混合 Context，不保证与消费者持有的 Context 引用相等；它的 `root`、`fiber`、隔离视图和资源所有权来自调用方，但服务属性、`get()` 与 `name in context` 按提供方依赖地址解释。同一 Context 对同一个服务实现重复读取会得到稳定视图；不同调用 Context 得到不同视图，但共享同一个提供方实例。服务替换后新实现会产生新视图；旧视图在该实现失效所触发的消费者清理期间仍固定到旧 Provider run，清理稳定后失效。调用方 Fiber 单独销毁而实现仍有效时，已保存 facade 的普通状态访问并不会因此自动失效，但通过其 `this.ctx` 创建新资源仍会触发 inactive-context 错误。绑定不会临时修改原 Service 的 `ctx`，因此同步嵌套调用和跨 `await` 的并发调用不会互相覆盖。Service 方法通过该调用 Context 创建的 Effect、监听器或子组件归调用方 Fiber；需要与提供方同寿命的资源应在构造或 `Service.init` 中创建。
+
+Service 方法在另一调用方 Fiber 中注册下游服务时，注册本身仍由调用方清理；运行时同时把该实现的有效期连到来源 Provider run。来源或实际 owner 开始清理后，内部两阶段钩子先让实现不可用于新解析并等待消费者继续用旧快照完成清理，再关闭 facade、释放 slot，随后两端才开始清理普通 Effect。这个连接只传递失效信号，不改变 Effect 所有权；来源新 run 可以重新注册同一服务地址，消费者清理错误仍会由触发卸载的生命周期 Promise 报告。
 
 这项包装只适用于继承 `Service` 的实例。通过 `context.provide()` 注册的普通对象、函数和原生对象保持原始引用，不会获得调用方 Context 绑定：
 
@@ -339,14 +343,14 @@ app.provide('database', database)
 app.database === database
 ```
 
-调用代理还有两项 JavaScript 语言限制：
+调用代理还有这些 JavaScript 语言限制：
 
 - 需要读取调用方 `this.ctx` 的方法必须写成 prototype 普通方法。箭头函数 class field 在构造时已经词法绑定原实例，会绕过 Proxy 的 `this`；
 - 实例自身的函数值保持原 identity 与可构造性，不提供可解构的稳定绑定；prototype 普通方法和 prototype Symbol 方法才会获得稳定 wrapper；
-- prototype 方法以 Proxy 作为 `this` 执行，不能访问原生 `#private` 字段，否则会触发 private brand 检查。此类状态应使用普通字段或 TypeScript `private` / `protected` 字段。
+- prototype 方法、getter 和 setter 以 Proxy 作为接收者执行，不能访问原生 `#private` 字段，否则会触发 private brand 检查。此类状态应使用普通字段或 TypeScript `private` / `protected` 字段。
 - facade 的 `ctx` 不能改写、删除或重新定义；facade 也不能被冻结、密封或设为不可扩展。
 
-在混合 Context 上继续调用 `extend()` 或 `isolate()` 时，派生结果会成为后续下游 Service 的新调用方视图，同时保留当前 Service 的提供方依赖来源。通过混合 Context 安装的新组件会清除这项调用帧，改用组件自己的 `inject` 和快照。Root 提供方没有组件快照，其依赖读取保持 Root 当前地址的实时、非 `inject` 限制语义。
+在混合 Context 上继续调用 `extend()` 或 `isolate()` 时，派生结果会成为后续下游 Service 的新调用方视图，同时保留当前 Service 的提供方依赖来源。通过混合 Context 安装的新组件会清除这项调用帧，改用组件自己的 `inject` 和快照。Root 提供方没有组件快照，其依赖读取在当前 Root run 内保持实时且不受 `inject` 限制；Root 重置后旧 facade 同样失效。
 
 上述调用身份、资源归属和代理限制记录在 [ADR-0004](./adr/0004-service-caller-context.md) 中；[Playground 场景](../playground/src/scenarios/service-caller-context.ts)演示了异步调用、Effect 所有权与隔离事件过滤。Context 拦截配置、callable Service、`Service.extend` 和 mixin 尚未实现。
 
@@ -909,8 +913,9 @@ Context 的原型链作用域以及 `isolate()` 用于组织服务可见性和�
 11. 配置更新与依赖变化必须经过同一串行协调过程，并最终收敛到最新目标。
 12. 配置校验失败不能改变已稳定运行的旧配置和 Effect。
 13. 服务隔离严格匹配当前地址，缺失时不能回退默认实现。
-14. 同一轮运行及其清理只能读取启动时捕获的服务快照。
+14. 同一轮运行及其实现失效所触发的消费者清理只能读取启动时捕获的服务快照；该轮清理稳定后旧 Service facade 必须失效。
 15. Service 调用视图只能绑定调用方 Context，不能临时修改原实例的提供方 Context。
 16. Service 的隔离事件过滤必须同时匹配 Root 和该服务名的隔离标签。
+17. 来源 Provider 或实际 owner 停止时，跨 Fiber 提供的下游服务必须先完成消费者失效与 facade/slot 关闭，再开始任一端的普通 Effect 清理。
 
 这些不变量比某个类的内部字段布局更重要。内部实现可以演进，但公开语义不应在没有相应设计和测试更新的情况下悄然改变。

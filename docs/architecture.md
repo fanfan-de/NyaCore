@@ -297,15 +297,18 @@ sequenceDiagram
     Events-->>Facade: 只调用同地址局部 Hook 与 global Hook
 ```
 
-这种组合维持三个边界：
+这种组合维持四个边界：
 
-- Service 不能借用 Consumer 的 `inject` 绕过自身依赖声明；
+- Service 不能借用 Consumer 的 `inject` 绕过自身依赖声明；每个实现固定其创建时的 Provider run 与快照，旧 facade 不迁移到重启后的新快照，并在该实现失效所触发的消费者清理稳定后失效；
 - Service 方法通过调用 Context 创建的资源归 Consumer Fiber，提供方长期资源应在构造或 `Service.init` 中创建；
+- 跨 Fiber 注册的下游服务仍由 Consumer 拥有，但来源与 owner run 共享内部两阶段卸载钩子：先停止新解析并等待旧消费者，再关闭 facade 与 slot，最后才清理普通 Effect；
 - Proxy 不临时修改原 Service 实例，因此跨 `await` 的并发调用不会互相覆盖 Context。
 
-组件提供方使用本轮固定依赖快照；Root 提供方没有组件快照，保留 Root 当前地址的实时读取语义。混合 Context 的 `extend()` / `isolate()` 会推进调用方视图并保留提供方依赖来源，安装出的新组件则使用自己的 `inject` 与快照。
+组件提供方使用本轮固定依赖快照；Root 提供方没有组件快照，在当前 Root run 内保留实时读取语义，Root 重置后旧 facade 失效。混合 Context 的 `extend()` / `isolate()` 会推进调用方视图并保留提供方依赖来源，安装出的新组件则使用自己的 `inject` 与快照。
 
-Proxy 只支持以普通 prototype 方法参与调用方追踪。箭头函数 class field 词法绑定原实例，原生 `#private` 字段又要求真实实例作为 `this`；两者都不适用于依赖调用方 `this.ctx` 的代理方法。完整决策见 [ADR-0004](./adr/0004-service-caller-context.md)。
+`provide()` disposer 会等待当前消费者完成清理并释放 slot。消费该服务的 Fiber 不应在自己的 cleanup 中反向 `await` 同一个 disposer，否则会构成相互等待；这是服务生命周期依赖环，而不是 Proxy 可以消除的调用绑定问题。
+
+Proxy 只支持以普通 prototype 方法参与调用方追踪。箭头函数 class field 词法绑定原实例，原生 `#private` 字段又要求真实实例作为方法或 accessor 的接收者；两者都不适用于依赖调用方 `this.ctx` 的代理成员。完整决策见 [ADR-0004](./adr/0004-service-caller-context.md)。
 
 ### 6.4 资源所有权与清理
 
@@ -350,7 +353,7 @@ flowchart TB
 9. 多次 `dispose()` 不能重复释放同一资源，单个清理失败不能阻止其余清理尝试。
 10. Context 派生不能修改父 Context，也不能替换根、Registry、ServiceRegistry、EventRegistry 或 Fiber 等核心引用。
 11. 服务地址必须同时包含 Root、服务名和隔离标签；缺失隔离实现时不能回退默认地址。
-12. Service 调用 Proxy 只能绑定调用方 Context，不能临时修改原 Service 实例；组件提供方的依赖读取使用固定快照，Root 提供方保留实时读取例外。
+12. Service 调用 Proxy 只能绑定调用方 Context，不能临时修改原 Service 实例；组件 Service 实现固定创建它的 Provider run 与快照，实现失效触发的消费者清理后旧 facade 失效，跨 Fiber 下游实现在来源与 owner run 的普通 Effect 清理前完成两阶段失效；Root 提供方在当前 run 内保留实时读取例外。
 13. Service 事件过滤必须同时匹配 Root 与该 Service 名称的隔离标签，`global` Hook 除外。
 
 这些行为分别由[生命周期测试](../packages/core/tests/lifecycle.spec.ts)、[服务依赖测试](../packages/core/tests/service.spec.ts)、[服务隔离测试](../packages/core/tests/isolation.spec.ts)和[事件测试](../packages/core/tests/events.spec.ts)覆盖。完整概念解释见[核心概念指南](./concepts.md)。

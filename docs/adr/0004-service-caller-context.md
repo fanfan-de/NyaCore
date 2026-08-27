@@ -17,16 +17,18 @@ ADR-0003 已经把服务身份定义为 Root Context、服务名和隔离标签�
 - 通过 Context 属性代理或 `context.get()` 读取 `Service` 实例时，运行时返回绑定到当前调用 Context 的 Proxy 视图，而不是直接暴露原始实例；
 - 同一个调用 Context 对同一个服务实现重复读取时返回稳定视图。不同调用 Context 获得不同视图，但它们仍指向同一个提供方实例；
 - 只有继承 `Service`、因而显式加入框架追踪协议的实例会被包装。普通 `context.provide(name, value)` 对象、函数和原生对象保持原引用和值语义；
-- 提供方在构造、`Service.init`、`Service.check` 和自身清理中继续使用原始 Service 实例与提供方 Context。
+- 提供方在构造、`Service.init`、`Service.check` 和自身清理中继续使用原始 Service 实例与提供方 Context。只有实例的原始 Context、服务名和隔离地址都与该实现一致时才复用原实例；把同一实例另以 alias 或其他隔离地址注册时仍返回携带该地址的 facade。
 
 ### 调用 Context 与提供方依赖快照各司其职
 
 - Service 原始实例永久保存提供方 Context；运行时不得为了某次调用临时修改它；
 - 调用方绑定视图中的普通 prototype 方法以该视图作为 `this` 执行，因此方法读取 `this.ctx` 时得到从调用方派生的混合 Context；它与调用方原 Context 不保证引用相等，但 `root`、`fiber`、隔离视图和资源所有权来自调用方。这个绑定对象跨越异步边界保持稳定，不依赖进程级全局变量或临时栈；
-- Service 读取它声明的依赖时仍受提供方 Fiber 当前固定依赖快照约束，不能借用调用方声明的依赖绕过自身 `inject`，也不能在同一轮运行中实时切换实现；
+- Service 读取它声明的依赖时固定到创建该服务实现的 Provider run 与依赖快照，不能借用调用方声明的依赖绕过自身 `inject`，也不能在 Provider 重启后把旧 facade 偷换到新快照；该实现失效并完成消费者清理后，旧 facade 进入 inactive 状态并释放快照，新一轮提供产生新的实现和 facade；
 - 混合 Context 的服务属性、`get()` 与 `name in context` 都观察提供方依赖地址；调用方隔离视图用于事件范围、显式派生和新安装组件，不会改写 Service 已捕获的依赖；
-- Root 提供方没有组件依赖快照，继续沿用 Root 对其当前服务地址进行实时、非 `inject` 限制的读取语义；
+- Root 提供方没有组件依赖快照，在当前 Root run 内继续对其服务地址进行实时、非 `inject` 限制的读取；Root 重置仍会使旧 facade 失效；
 - Service 方法通过调用方 Context 创建的 Effect、监听器或子组件仍归调用方 Fiber 所有。需要与 Service 提供方同寿命的资源应在构造或 `Service.init` 中创建；
+- 如果 Service 方法在另一个调用方 Fiber 中注册下游服务，注册资源仍归调用方所有，但运行时会在来源 Provider run 和实际 owner run 上登记同一组内部两阶段卸载钩子。任一端开始清理时，第一阶段先让实现不可用于新消费者，并等待旧消费者用固定快照完成卸载；第二阶段再关闭 facade、释放快照和 slot，之后才开始任一端的普通 Effect 清理。消费者清理错误会沿触发卸载的 Fiber 或公开 disposer 传播；这条失效边不会把下游资源所有权转给 Provider，来源结束后新 run 可以重新注册同一地址；
+- `provide()` 返回的 disposer 以消费者清理和 slot 关闭作为完成边界。消费者自己的 cleanup 不得反向 `await` 它正在消费的服务 disposer，否则 disposer 等待该消费者、消费者又等待 disposer，会形成循环依赖；这项限制适用于普通服务和 Service 方法注册的下游服务；
 - 从 Service 方法继续取得另一个可追踪 Service 时，新的视图继续携带最初调用方 Context，同时使用下游服务自己的提供方信息。
 - 在混合 Context 上调用 `extend()` 或 `isolate()` 会保留提供方依赖来源，并把派生 Context 推进为新的调用方视图；通过它安装的新组件则清除 Service 调用帧，使用组件自己的 `inject` 与快照。
 
@@ -41,7 +43,7 @@ ADR-0003 已经把服务身份定义为 Root Context、服务名和隔离标签�
 
 - Service 中需要参与调用方追踪的方法必须声明为 prototype 普通方法；箭头函数 class field 在构造时已经词法绑定原始实例，调用它会绕过 Proxy 的 `this`，因此不能依赖其中的 `this.ctx` 获得调用方 Context；
 - 实例自身的函数值（包括箭头函数字段、构造器或其他可调用对象）保持原 identity 与可构造性，不会被稳定绑定；只有 prototype 数据方法及其 Symbol 方法获得可解构的稳定 wrapper；
-- 以 Proxy 作为 `this` 调用 prototype 方法时，JavaScript 原生 `#private` 字段的品牌检查会失败。需要被调用方代理的方法应使用普通字段或 TypeScript `private` / `protected` 字段，不应访问 `#private` 字段；
+- 以 Proxy 作为 `this` 调用 prototype 方法、getter 或 setter 时，JavaScript 原生 `#private` 字段的品牌检查会失败。需要被调用方代理的成员应使用普通字段或 TypeScript `private` / `protected` 字段，不应访问 `#private` 字段；
 - facade 的 `ctx` 是不可替换的调用视图，不能通过赋值、删除或属性描述符改写。为维持 Proxy 不变量，Service 的 `ctx` 必须保持可配置，facade 也不支持 `preventExtensions`、`seal` 或 `freeze`；
 - callable Service、`Service.extend` 和 mixin 尚未由本决策实现。它们后续必须复用同一套调用方绑定协议，并继续遵守上述限制，不能另建会修改原实例 Context 的路径。
 
@@ -51,6 +53,7 @@ ADR-0003 已经把服务身份定义为 Root Context、服务名和隔离标签�
 - Service 发出的带 `thisArg` 事件可以复用既有 EventRegistry 过滤机制，不需要为每个隔离标签建立独立事件总线；
 - 普通 `provide()` 对象保持引用身份和兼容性，但不会自动获得调用方追踪或隔离事件过滤；需要这些能力时应使用 `Service`；
 - Service 作者必须遵守 Proxy 可代理的方法形态，原生 `#private` 字段和箭头函数实例方法不能用于依赖调用方 Context 的路径；
+- 旧 facade 只在其实现失效所触发的消费者清理期间保留原 Provider run 的快照，不会迁移到替换实现；该轮清理稳定后继续调用会按 inactive-context 语义失败。跨 Fiber 注册的下游服务在来源 run 的普通 Effect 清理前完成两阶段失效，避免消费者假活或旧实现永久占用 slot；
 - caller-bound 视图需要按调用 Context 缓存。缓存必须使用弱引用键或随具体服务实现释放，避免 Service 卸载后长期持有消费者 Context；
 - 服务隔离和事件过滤仍只是同一 JavaScript 进程内的运行时路由规则，不是权限或安全沙箱。代码仍可访问文件系统、网络、环境变量和全局对象。
 

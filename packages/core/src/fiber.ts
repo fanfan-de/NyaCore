@@ -7,6 +7,7 @@ import type { Component, ResolvedInject } from './component.js'
 import type { ComponentRuntime } from './registry.js'
 import type { DependencySnapshot, ServiceAddress } from './service.js'
 import {
+  fiberBeforeUnload,
   fiberGetServiceImplementation,
   fiberGetServiceSource,
   serviceCapture,
@@ -52,6 +53,21 @@ function includesFailure(
   return errors.some(error => includesFailure(error, target, seen))
 }
 
+/** 合并清理失败时只去掉被新错误完整包含的项，不丢失部分重叠的原因。 */
+function addFailure(errors: unknown[], candidate: unknown) {
+  if (errors.some(error => includesFailure(error, candidate))) return
+
+  for (let index = errors.length - 1; index >= 0; index--) {
+    if (includesFailure(candidate, errors[index])) errors.splice(index, 1)
+  }
+  errors.push(candidate)
+}
+
+interface BeforeUnloadHook {
+  readonly invalidate: Disposer
+  readonly finalize?: Disposer
+}
+
 /** 管理一次组件安装，以及该实例随依赖变化产生的多轮运行。 */
 export class Fiber implements PromiseLike<void> {
   readonly context: Context
@@ -80,6 +96,9 @@ export class Fiber implements PromiseLike<void> {
 
   /** 当前一轮运行独占的 Effect 栈；依赖变化后会销毁并替换为新栈。 */
   #runEffects: DisposableStack | undefined
+
+  /** 必须先于本轮任何 Effect 清理完成的内部失效工作。 */
+  #beforeUnload: Set<BeforeUnloadHook> | undefined
 
   /** 服务注册表最近计算出的目标快照；undefined 表示至少缺少一个依赖。 */
   #desiredSnapshot: DependencySnapshot | undefined
@@ -130,7 +149,10 @@ export class Fiber implements PromiseLike<void> {
     this.state = options.runtime ? FiberState.PENDING : FiberState.ACTIVE
 
     // 根 Fiber 本身始终是一轮可写运行；普通 Fiber 要等依赖满足后再创建栈。
-    if (!options.runtime) this.#runEffects = new DisposableStack()
+    if (!options.runtime) {
+      this.#runEffects = new DisposableStack()
+      this.#beforeUnload = new Set()
+    }
   }
 
   static root(context: Context) {
@@ -240,6 +262,22 @@ export class Fiber implements PromiseLike<void> {
     return {
       run: this.#activeRun,
       snapshot: this.#activeSnapshot,
+    }
+  }
+
+  /** 登记当前 run 的卸载前工作；返回函数只撤销登记，不执行回调。 */
+  [fiberBeforeUnload](invalidate: Disposer, finalize?: Disposer): Disposer {
+    this.assertActive()
+    const hooks = this.#beforeUnload
+    if (!hooks) throw new Error('inactive context')
+
+    const hook = { invalidate, finalize }
+    hooks.add(hook)
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      hooks.delete(hook)
     }
   }
 
@@ -504,6 +542,7 @@ export class Fiber implements PromiseLike<void> {
     if (!runtime || this.#disposeOperation) return
 
     this.#runEffects = new DisposableStack()
+    this.#beforeUnload = new Set()
     this.#activeSnapshot = snapshot
     this.#activeRun = ++this.#runCounter
     this.#activeConfigVersion = configVersion
@@ -524,7 +563,7 @@ export class Fiber implements PromiseLike<void> {
       let failure = error
 
       try {
-        await this.#runEffects.dispose()
+        await this.#disposeRunEffects()
       } catch (cleanupError) {
         this.#cleanupBlocked = true
         if (includesFailure(error, cleanupError)) {
@@ -542,6 +581,7 @@ export class Fiber implements PromiseLike<void> {
 
       this.error = failure
       this.#runEffects = undefined
+      this.#beforeUnload = undefined
       this.#activeSnapshot = undefined
       this.#activeRun = undefined
       this.#activeConfigVersion = undefined
@@ -569,16 +609,17 @@ export class Fiber implements PromiseLike<void> {
 
   /** 只撤销当前运行；保留 Fiber、Runtime 登记和依赖订阅以便再次激活。 */
   async #unloadRun() {
-    if (!this.#runEffects && !this.#activeSnapshot) return
+    if (!this.#runEffects && !this.#activeSnapshot && !this.#beforeUnload) {
+      return
+    }
 
     this.#setState(FiberState.UNLOADING)
-    const effects = this.#runEffects
-
     try {
-      await effects?.dispose()
+      await this.#disposeRunEffects()
     } finally {
       // 清理函数执行期间仍能读取旧 snapshot；全部清理结束后才解除固定。
       this.#runEffects = undefined
+      this.#beforeUnload = undefined
       this.#activeSnapshot = undefined
       this.#activeRun = undefined
       this.#activeConfigVersion = undefined
@@ -608,6 +649,7 @@ export class Fiber implements PromiseLike<void> {
       if (this.isRoot) {
         // 根 Fiber 的 dispose 只清空整棵资源树，根 Context 之后仍可复用。
         this.#runEffects = new DisposableStack()
+        this.#beforeUnload = new Set()
         this.#disposeOperation = undefined
         this.error = undefined
         this.#setState(FiberState.ACTIVE)
@@ -638,6 +680,39 @@ export class Fiber implements PromiseLike<void> {
     const init = Reflect.get(instance, serviceInit)
     if (typeof init === 'function') {
       return Reflect.apply(init, instance, []) as CleanupSource
+    }
+  }
+
+  /** 先完成依赖失效，再清理 Effect；任一阶段失败都不跳过另一阶段。 */
+  async #disposeRunEffects() {
+    const errors: unknown[] = []
+    const hooks = [...this.#beforeUnload ?? []]
+    this.#beforeUnload?.clear()
+
+    const invalidationResults = await Promise.allSettled(
+      hooks.map(async hook => hook.invalidate()),
+    )
+    for (const result of invalidationResults) {
+      if (result.status === 'rejected') addFailure(errors, result.reason)
+    }
+
+    // 即使消费者清理失败，也必须关闭旧 frame/slot 后再进入 Effect 清理。
+    const finalizationResults = await Promise.allSettled(
+      hooks.map(async hook => hook.finalize?.()),
+    )
+    for (const result of finalizationResults) {
+      if (result.status === 'rejected') addFailure(errors, result.reason)
+    }
+
+    try {
+      await this.#runEffects?.dispose()
+    } catch (error) {
+      addFailure(errors, error)
+    }
+
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) {
+      throw new AggregateError(errors, 'multiple run cleanup phases failed')
     }
   }
 

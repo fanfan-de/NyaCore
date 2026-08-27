@@ -193,6 +193,10 @@ npm run check
 
 Context 拦截、callable Service、mixin、Logger、Loader 和 HMR 仍属于目标设计，尚不能作为已实现能力使用。异步 Standard Schema 校验也不在当前版本支持范围内。
 
+## 许可证
+
+本项目采用 MIT License。
+
 ## 贡献
 
 公共 API 或可观察行为变化应同时更新测试和 `docs/concepts.md`；生命周期、依赖解析、清理顺序或作用域语义变化必须补充相应测试。新的跨模块架构决策应记录到 `docs/adr/`。

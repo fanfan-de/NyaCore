@@ -13,6 +13,7 @@ declare module '../src/index.js' {
     'caller/resource'(value: number): void
     'caller/nested-service-event'(this: object, value: string): void
     'caller/derived-service-event'(this: object, value: string): void
+    'caller/alias-service-event'(this: object, value: string): void
   }
 }
 
@@ -156,6 +157,12 @@ describe('Service caller tracking', () => {
 
     await Promise.all([first.dispose(), second.dispose()])
     await provider.dispose()
+    expect(() => firstProperty.value).toThrow('inactive context')
+    expect(() => {
+      firstProperty.value = 'stale write'
+    }).toThrow('inactive context')
+    expect(() => 'value' in firstProperty).toThrow('inactive context')
+    expect(() => Object.keys(firstProperty)).toThrow('inactive context')
   })
 
   it('preserves identity and native behavior for ordinary provided objects', async () => {
@@ -186,6 +193,97 @@ describe('Service caller tracking', () => {
 
     await consumer.dispose()
     await remove()
+  })
+
+  it('uses an alias implementation address when the Provider reads its Service', async () => {
+    const app = new Context()
+    const canonicalEvents: string[] = []
+    const aliasEvents: string[] = []
+
+    class AliasService extends Service {
+      static provide = 'callerCanonicalService'
+
+      publish(value: string) {
+        this.ctx.emit(this, 'caller/alias-service-event', value)
+      }
+    }
+
+    const raw = new AliasService(app)
+    const removeAlias = app.provide('callerAliasService', raw)
+    const canonicalListener = app.isolate('callerAliasService')
+    const aliasListener = app.isolate('callerCanonicalService')
+    const removeCanonicalListener = canonicalListener.on(
+      'caller/alias-service-event',
+      value => canonicalEvents.push(value),
+    )
+    const removeAliasListener = aliasListener.on(
+      'caller/alias-service-event',
+      value => aliasEvents.push(value),
+    )
+
+    const canonical = read<AliasService>(app, 'callerCanonicalService')
+    const alias = read<AliasService>(app, 'callerAliasService')
+    expect(canonical).toBe(raw)
+    expect(alias).not.toBe(raw)
+
+    canonical.publish('canonical')
+    alias.publish('alias')
+    expect(canonicalEvents).toEqual(['canonical'])
+    expect(aliasEvents).toEqual(['alias'])
+
+    await Promise.all([
+      removeAliasListener(),
+      removeCanonicalListener(),
+      removeAlias(),
+    ])
+    await app.fiber.restart()
+  })
+
+  it('does not reuse a raw Service across same-named isolation addresses', async () => {
+    const app = new Context()
+    const isolated = app.isolate(
+      'callerRepeatedService',
+      Symbol('repeated service isolation'),
+    )
+    const defaultEvents: string[] = []
+    const isolatedEvents: string[] = []
+
+    class RepeatedService extends Service {
+      static provide = 'callerRepeatedService'
+
+      publish(value: string) {
+        this.ctx.emit(this, 'caller/alias-service-event', value)
+      }
+    }
+
+    const raw = new RepeatedService(app)
+    const removeIsolated = isolated.provide('callerRepeatedService', raw)
+    const removeDefaultListener = app.on(
+      'caller/alias-service-event',
+      value => defaultEvents.push(value),
+    )
+    const removeIsolatedListener = isolated.on(
+      'caller/alias-service-event',
+      value => isolatedEvents.push(value),
+    )
+    const isolatedView = read<RepeatedService>(
+      isolated,
+      'callerRepeatedService',
+    )
+
+    expect(read<RepeatedService>(app, 'callerRepeatedService')).toBe(raw)
+    expect(isolatedView).not.toBe(raw)
+    raw.publish('default')
+    isolatedView.publish('isolated')
+    expect(defaultEvents).toEqual(['default'])
+    expect(isolatedEvents).toEqual(['isolated'])
+
+    await Promise.all([
+      removeIsolatedListener(),
+      removeDefaultListener(),
+      removeIsolated(),
+    ])
+    await app.fiber.restart()
   })
 
   it('owns effects, listeners, and installed children through the caller Fiber', async () => {
@@ -258,6 +356,7 @@ describe('Service caller tracking', () => {
     const app = new Context()
     const caller = app.isolate('callerBackend', Symbol('caller backend'))
     const cleanupIds: number[] = []
+    const cleanupBackendIds: number[] = []
     const observations: Array<[number, number]> = []
     const activeFacades: WorkerService[] = []
     const cleanupFacades: WorkerService[] = []
@@ -304,7 +403,9 @@ describe('Service caller tracking', () => {
           'cannot get service "callerOnly" without inject',
         )
         return () => {
-          cleanupFacades.push(read<WorkerService>(context, 'callerWorker'))
+          const cleanupFacade = read<WorkerService>(context, 'callerWorker')
+          cleanupFacades.push(cleanupFacade)
+          cleanupBackendIds.push(cleanupFacade.backendId())
         }
       },
     })
@@ -316,6 +417,7 @@ describe('Service caller tracking', () => {
     expect(cleanupIds).toEqual([1])
     expect(cleanupFacades).toHaveLength(1)
     expect(cleanupFacades[0]).toBe(activeFacades[0])
+    expect(cleanupBackendIds).toEqual([1])
     expect(provider.state).toBe(FiberState.PENDING)
     expect(consumer.state).toBe(FiberState.PENDING)
 
@@ -324,8 +426,10 @@ describe('Service caller tracking', () => {
 
     expect(observations).toEqual([[1, 99], [2, 99]])
     expect(activeFacades).toHaveLength(2)
-    expect(activeFacades[1]).not.toBe(activeFacades[0])
-    expect(activeFacades[0].backendId()).toBe(1)
+    // Vitest 的 `.not.toBe()` 会在引用不同时继续深读对象以生成提示；
+    // 旧 facade 已按约定拒绝属性读取，因此直接断言 Object.is 结果。
+    expect(Object.is(activeFacades[1], activeFacades[0])).toBe(false)
+    expect(() => activeFacades[0].backendId()).toThrow('inactive context')
     expect(activeFacades[1].backendId()).toBe(2)
     expect(provider.state).toBe(FiberState.ACTIVE)
     expect(consumer.state).toBe(FiberState.ACTIVE)
@@ -333,6 +437,7 @@ describe('Service caller tracking', () => {
     await consumer.dispose()
     expect(cleanupFacades).toHaveLength(2)
     expect(cleanupFacades[1]).toBe(activeFacades[1])
+    expect(cleanupBackendIds).toEqual([1, 2])
     await provider.dispose()
     expect(cleanupIds).toEqual([1, 2])
     await Promise.all([
@@ -564,6 +669,7 @@ describe('Service caller tracking', () => {
   it('invalidates cross-owner Services before their source Provider cleans up', async () => {
     const app = new Context()
     const events: string[] = []
+    const starts: number[] = []
 
     interface Dependency {
       id: number
@@ -602,7 +708,7 @@ describe('Service caller tracking', () => {
 
     const consumer = app.inject(['callerSourceInner'], (context) => {
       const facade = read<InnerService>(context, 'callerSourceInner')
-      expect(facade.dependencyId()).toBe(1)
+      starts.push(facade.dependencyId())
       return () => {
         events.push(`inner:stop:${facade.dependencyId()}`)
       }
@@ -616,10 +722,388 @@ describe('Service caller tracking', () => {
     expect(consumer.state).toBe(FiberState.PENDING)
     expect(events).toEqual(['inner:stop:1', 'outer:stop'])
     expect(app.get('callerSourceInner')).toBeUndefined()
+    expect(() => inner.dependencyId()).toThrow('inactive context')
+
+    const removeReplacement = app.provide(
+      'callerSourceDependency',
+      { id: 2 },
+    )
+    await outerProvider
+    const replacementInner = read<OuterService>(app, 'callerSourceOuter')
+      .createInner()
+    await consumer
+
+    expect(replacementInner.dependencyId()).toBe(2)
+    expect(starts).toEqual([1, 2])
+    expect(consumer.state).toBe(FiberState.ACTIVE)
+    const replacementFacade = read<InnerService>(app, 'callerSourceInner')
+    expect(replacementFacade).not.toBe(replacementInner)
+    expect(replacementFacade.dependencyId()).toBe(2)
 
     await consumer.dispose()
     await outerProvider.dispose()
+    expect(app.get('callerSourceInner')).toBeUndefined()
+    await removeReplacement()
     await app.fiber.restart()
+  })
+
+  it('invalidates consumers before Provider Effects added after the source edge', async () => {
+    const app = new Context()
+    const events: string[] = []
+    let resourceAlive = true
+    let rawOuter!: OuterService
+
+    class InnerService extends Service {
+      static provide = 'callerOrderedInner'
+
+      useProviderResource() {
+        if (!resourceAlive) throw new Error('provider resource already closed')
+        events.push('inner:resource-live')
+      }
+    }
+
+    class OuterService extends Service {
+      static provide = 'callerOrderedOuter'
+      static inject = ['callerOrderedDependency']
+
+      constructor(context: Context) {
+        super(context)
+        rawOuter = this
+      }
+
+      createInner() {
+        return new InnerService(this.ctx)
+      }
+
+      addLateResource() {
+        this.ctx.effect(() => () => {
+          resourceAlive = false
+          events.push('provider-resource:stop')
+        })
+      }
+
+      [Service.init]() {
+        return () => events.push('outer:stop')
+      }
+    }
+
+    const removeDependency = app.provide(
+      'callerOrderedDependency',
+      true,
+    )
+    const provider = app.installComponent(OuterService)
+    await provider
+    read<OuterService>(app, 'callerOrderedOuter').createInner()
+    rawOuter.addLateResource()
+
+    const consumer = app.inject(['callerOrderedInner'], (context) => {
+      const inner = read<InnerService>(context, 'callerOrderedInner')
+      return () => {
+        inner.useProviderResource()
+        events.push('inner:stop')
+      }
+    })
+    await consumer
+
+    await removeDependency()
+
+    expect(events).toEqual([
+      'inner:resource-live',
+      'inner:stop',
+      'provider-resource:stop',
+      'outer:stop',
+    ])
+    expect(provider.state).toBe(FiberState.PENDING)
+    expect(consumer.state).toBe(FiberState.PENDING)
+
+    await consumer.dispose()
+    await provider.dispose()
+    await app.fiber.restart()
+  })
+
+  it('keeps the old source readable while source and owner unload together', async () => {
+    const app = new Context()
+    const cleanupIds: number[] = []
+
+    interface Dependency {
+      id: number
+    }
+
+    class InnerService extends Service {
+      static provide = 'callerConcurrentOwnerInner'
+
+      dependencyId() {
+        return read<Dependency>(
+          this.ctx,
+          'callerConcurrentOwnerDependency',
+        ).id
+      }
+    }
+
+    class OuterService extends Service {
+      static provide = 'callerConcurrentOwnerOuter'
+      static inject = ['callerConcurrentOwnerDependency']
+
+      createInner() {
+        return new InnerService(this.ctx)
+      }
+    }
+
+    const removeDependency = app.provide(
+      'callerConcurrentOwnerDependency',
+      { id: 1 },
+    )
+    const provider = app.installComponent(OuterService)
+    await provider
+
+    const owner = app.inject(['callerConcurrentOwnerOuter'], (context) => {
+      read<OuterService>(context, 'callerConcurrentOwnerOuter').createInner()
+    })
+    await owner
+    const consumer = app.inject(
+      ['callerConcurrentOwnerInner'],
+      (context) => {
+        const inner = read<InnerService>(
+          context,
+          'callerConcurrentOwnerInner',
+        )
+        return () => {
+          cleanupIds.push(inner.dependencyId())
+        }
+      },
+    )
+    await consumer
+
+    await removeDependency()
+
+    expect(owner.state).toBe(FiberState.PENDING)
+    expect(consumer.state).toBe(FiberState.PENDING)
+    expect(provider.state).toBe(FiberState.PENDING)
+    expect(cleanupIds).toEqual([1])
+    expect(app.get('callerConcurrentOwnerInner')).toBeUndefined()
+
+    await Promise.all([
+      consumer.dispose(),
+      owner.dispose(),
+      provider.dispose(),
+    ])
+  })
+
+  it('waits for downstream consumers before cleaning caller-owned resources', async () => {
+    const app = new Context()
+    const cleanupStarted = deferred()
+    const cleanupGate = deferred()
+    const observedAlive: boolean[] = []
+    let rawInner!: OwnedInnerService
+
+    class OwnedInnerService extends Service {
+      static provide = 'callerOwnedInner'
+
+      alive = true
+
+      constructor(context: Context) {
+        super(context)
+        rawInner = this
+        context.effect(() => () => {
+          this.alive = false
+        }, 'caller-owned inner resource')
+      }
+
+      isAlive() {
+        return this.alive
+      }
+    }
+
+    class OwnerService extends Service {
+      static provide = 'callerOwnedOuter'
+
+      createInner() {
+        return new OwnedInnerService(this.ctx)
+      }
+    }
+
+    const provider = app.installComponent(OwnerService)
+    await provider
+    const owner = app.inject(['callerOwnedOuter'], (context) => {
+      read<OwnerService>(context, 'callerOwnedOuter').createInner()
+    })
+    await owner
+    const consumer = app.inject(['callerOwnedInner'], (context) => {
+      const inner = read<OwnedInnerService>(context, 'callerOwnedInner')
+      return async () => {
+        cleanupStarted.resolve()
+        await cleanupGate.promise
+        observedAlive.push(inner.isAlive())
+      }
+    })
+    await consumer
+
+    const disposingOwner = owner.dispose()
+    await cleanupStarted.promise
+    expect(rawInner.alive).toBe(true)
+
+    cleanupGate.resolve()
+    await disposingOwner
+    expect(observedAlive).toEqual([true])
+    expect(rawInner.alive).toBe(false)
+    expect(consumer.state).toBe(FiberState.PENDING)
+    expect(provider.state).toBe(FiberState.ACTIVE)
+
+    await consumer.dispose()
+    await provider.dispose()
+    await app.fiber.restart()
+  })
+
+  it('joins source-first removal through consumer drain and finalization', async () => {
+    const app = new Context()
+    const cleanupStarted = deferred()
+    const cleanupGate = deferred()
+    const events: string[] = []
+    let providerResourceAlive = true
+
+    class RaceSourceService extends Service {
+      static provide = 'callerRaceSource'
+      static inject = ['callerRaceDependency']
+
+      expose() {
+        return this.ctx.provide('callerRaceDownstream', {})
+      }
+
+      [Service.init]() {
+        return () => {
+          providerResourceAlive = false
+          events.push('provider:stop')
+        }
+      }
+    }
+
+    const removeDependency = app.provide('callerRaceDependency', {})
+    const provider = app.installComponent(RaceSourceService)
+    await provider
+    const removeDownstream = read<RaceSourceService>(
+      app,
+      'callerRaceSource',
+    ).expose()
+    const consumer = app.inject(['callerRaceDownstream'], () => {
+      return async () => {
+        events.push('consumer:start')
+        cleanupStarted.resolve()
+        await cleanupGate.promise
+        events.push(`consumer:resource:${providerResourceAlive}`)
+      }
+    })
+    await consumer
+
+    const removingDependency = Promise.resolve(removeDependency())
+    await cleanupStarted.promise
+    const removingDownstream = Promise.resolve(removeDownstream())
+    let publicRemovalSettled = false
+    void removingDownstream.then(
+      () => {
+        publicRemovalSettled = true
+      },
+      () => {
+        publicRemovalSettled = true
+      },
+    )
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(publicRemovalSettled).toBe(false)
+    expect(providerResourceAlive).toBe(true)
+
+    cleanupGate.resolve()
+    await Promise.all([removingDownstream, removingDependency])
+    expect(events).toEqual([
+      'consumer:start',
+      'consumer:resource:true',
+      'provider:stop',
+    ])
+    expect(provider.state).toBe(FiberState.PENDING)
+    expect(consumer.state).toBe(FiberState.PENDING)
+    const removeReplacement = app.provide(
+      'callerRaceDownstream',
+      { replacement: true },
+    )
+    expect(app.get('callerRaceDownstream')).toEqual({ replacement: true })
+    await removeReplacement()
+
+    await consumer.dispose()
+    await provider.dispose()
+    await app.fiber.restart()
+  })
+
+  it('propagates a manual-first barrier failure to both removal paths', async () => {
+    const app = new Context()
+    const cleanupStarted = deferred()
+    const cleanupGate = deferred()
+    const cleanupError = new Error('downstream cleanup failed')
+    const events: string[] = []
+    let providerResourceAlive = true
+
+    class FailingRaceSourceService extends Service {
+      static provide = 'callerFailingRaceSource'
+      static inject = ['callerFailingRaceDependency']
+
+      expose() {
+        return this.ctx.provide('callerFailingRaceDownstream', {})
+      }
+
+      [Service.init]() {
+        return () => {
+          providerResourceAlive = false
+          events.push('provider:stop')
+        }
+      }
+    }
+
+    const removeDependency = app.provide(
+      'callerFailingRaceDependency',
+      {},
+    )
+    const provider = app.installComponent(FailingRaceSourceService)
+    await provider
+    const removeDownstream = read<FailingRaceSourceService>(
+      app,
+      'callerFailingRaceSource',
+    ).expose()
+    const consumer = app.inject(['callerFailingRaceDownstream'], () => {
+      return async () => {
+        cleanupStarted.resolve()
+        await cleanupGate.promise
+        events.push(`consumer:resource:${providerResourceAlive}`)
+        throw cleanupError
+      }
+    })
+    await consumer
+
+    const removingDownstream = Promise.resolve(removeDownstream())
+    await cleanupStarted.promise
+    const removingDependency = Promise.resolve(removeDependency())
+    cleanupGate.resolve()
+    const results = await Promise.allSettled([
+      removingDownstream,
+      removingDependency,
+    ])
+
+    expect(results).toEqual([
+      { status: 'rejected', reason: cleanupError },
+      { status: 'rejected', reason: cleanupError },
+    ])
+    expect(events).toEqual(['consumer:resource:true', 'provider:stop'])
+    expect(providerResourceAlive).toBe(false)
+    expect(app.get('callerFailingRaceDownstream')).toBeUndefined()
+    expect(provider.state).toBe(FiberState.FAILED)
+    expect(consumer.state).toBe(FiberState.FAILED)
+    const removeReplacement = app.provide(
+      'callerFailingRaceDownstream',
+      { replacement: true },
+    )
+    expect(app.get('callerFailingRaceDownstream')).toEqual({
+      replacement: true,
+    })
+    await removeReplacement()
+
+    await consumer.dispose()
+    await provider.dispose()
   })
 
   it('returns a facade for another Context on the Provider Fiber', async () => {
@@ -837,6 +1321,7 @@ describe('Service caller tracking', () => {
     const app = new Context()
     const firstDependency = { id: 1 }
     const secondDependency = { id: 2 }
+    const cleanupDependencies: unknown[] = []
 
     class RootService extends Service {
       static provide = 'callerRootService'
@@ -863,19 +1348,76 @@ describe('Service caller tracking', () => {
     expect(firstFacade.dependency()).toBeUndefined()
     app.provide('callerRootDependency', secondDependency)
     expect(firstFacade.dependency()).toBe(secondDependency)
+    const consumer = app.inject(['callerRootService'], (context) => {
+      const service = read<RootService>(context, 'callerRootService')
+      return () => {
+        cleanupDependencies.push(service.dependency())
+      }
+    })
+    await consumer
 
     await app.fiber.restart()
+    expect(cleanupDependencies).toEqual([secondDependency])
     expect(app.get('callerRootService')).toBeUndefined()
     expect(caller.get('callerRootService')).toBeUndefined()
+    expect(() => firstFacade.dependency()).toThrow('inactive context')
 
     const replacement = new RootService(app)
     const replacementFacade = read<RootService>(caller, 'callerRootService')
     expect(read<RootService>(app, 'callerRootService')).toBe(replacement)
-    expect(replacementFacade).not.toBe(firstFacade)
+    expect(Object.is(replacementFacade, firstFacade)).toBe(false)
     expect(read<RootService>(caller, 'callerRootService'))
       .toBe(replacementFacade)
 
     await app.fiber.restart()
+  })
+
+  it('propagates Service consumer cleanup failures through Root reset', async () => {
+    const app = new Context()
+    const cleanupError = new Error('root Service consumer cleanup failed')
+
+    class RootFailureService extends Service {
+      static provide = 'callerRootFailureService'
+    }
+
+    new RootFailureService(app)
+    const consumer = app.inject(['callerRootFailureService'], () => {
+      return () => {
+        throw cleanupError
+      }
+    })
+    await consumer
+
+    await expect(app.fiber.restart()).rejects.toBe(cleanupError)
+    expect(app.fiber.state).toBe(FiberState.ACTIVE)
+    expect(consumer.state).toBe(FiberState.DISPOSED)
+    expect(app.get('callerRootFailureService')).toBeUndefined()
+  })
+
+  it('propagates Service consumer cleanup failures through parent disposal', async () => {
+    const app = new Context()
+    const cleanupError = new Error('parent Service consumer cleanup failed')
+    let child!: Fiber
+
+    class ParentFailureService extends Service {
+      static provide = 'callerParentFailureService'
+    }
+
+    const parent = app.installComponent((context) => {
+      new ParentFailureService(context)
+      child = context.inject(['callerParentFailureService'], () => {
+        return () => {
+          throw cleanupError
+        }
+      })
+    })
+    await parent
+    await child
+
+    await expect(parent.dispose()).rejects.toBe(cleanupError)
+    expect(parent.state).toBe(FiberState.DISPOSED)
+    expect(child.state).toBe(FiberState.DISPOSED)
+    expect(app.get('callerParentFailureService')).toBeUndefined()
   })
 
   it('keeps concurrent asynchronous calls bound to their own callers', async () => {

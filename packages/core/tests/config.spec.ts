@@ -532,7 +532,7 @@ describe('Fiber config concurrency', () => {
     })
     await fiber
 
-    await removeFirst()
+    await expect(removeFirst()).rejects.toBe(error)
     expect(fiber.error).toBe(error)
     expect(fiber.state).toBe(FiberState.FAILED)
 
@@ -571,7 +571,7 @@ describe('Fiber config concurrency', () => {
     }, { value: 1 })
     await fiber
 
-    await removeFirst()
+    await expect(removeFirst()).rejects.toBe(error)
     expect(fiber.state).toBe(FiberState.FAILED)
 
     await fiber.update({ value: 2 })

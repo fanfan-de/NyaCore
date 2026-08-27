@@ -310,9 +310,9 @@ Component B Context
 4. 返回绑定到正确调用 Context 的服务值；
 5. 在未声明依赖或依赖失效时给出明确错误。
 
-Service 方法不能简单地脱离提供方 Context 调用。当前运行时会为消费者读取到的 Service 建立调用方绑定 Proxy：普通方法中的 `this.ctx` 是从调用方派生的混合 Context，其资源与空间能力属于调用方，Service 自身的依赖读取仍来自提供方 Fiber 的固定快照。普通 `provide()` 对象保持原值，不进入这套代理协议。
+Service 方法不能简单地脱离提供方 Context 调用。当前运行时会为消费者读取到的 Service 建立调用方绑定 Proxy：普通方法中的 `this.ctx` 是从调用方派生的混合 Context，其资源与空间能力属于调用方，Service 自身的依赖读取固定到创建该实现的 Provider run 与快照。普通 `provide()` 对象保持原值，不进入这套代理协议。
 
-绑定不能通过临时修改原 Service 实例的 Context 实现，否则异步并发调用会互相覆盖。依赖调用方 `this.ctx` 的方法必须是 prototype 普通方法；箭头函数 class field 会词法绑定原实例，访问原生 `#private` 字段的 prototype 方法也无法以 Proxy 作为 `this` 执行。
+绑定不能通过临时修改原 Service 实例的 Context 实现，否则异步并发调用会互相覆盖。依赖调用方 `this.ctx` 的方法必须是 prototype 普通方法；箭头函数 class field 会词法绑定原实例，访问原生 `#private` 字段的 prototype 方法或 accessor 也无法以 Proxy 作为接收者执行。
 
 ### 6.5 Context 识别
 
@@ -565,6 +565,7 @@ testContext.provide('database', testDatabase)
 
 - 调用方 Context 决定方法中的 `this.ctx`、新建 Effect 的所有者和事件过滤空间；
 - 提供方 Fiber 的固定快照决定 Service 可以读取哪些依赖，不能借调用方依赖绕过自身 `inject`；
+- Service 实现固定创建它的 Provider run；旧 facade 不迁移到替换后的快照，并在该实现失效所触发的消费者清理后失效；跨 Fiber 注册的下游实现由来源与 owner run 共享两阶段失效屏障，在两端普通 Effect 清理前停止消费者并关闭 facade/slot，后继 run 可重新注册；
 - 同一调用 Context 重复读取同一实现时视图 identity 稳定，不同调用 Context 的视图互相独立；
 - 普通 `provide()` 值不包装，保持引用 identity；
 - Service 作为显式事件 `thisArg` 时，只派发到同一 Root、同一服务隔离标签的局部监听器；`global` 监听器跳过过滤；

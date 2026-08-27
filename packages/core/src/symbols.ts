@@ -26,6 +26,11 @@ export const fiberGetServiceSource = Symbol(
   '@nya/core/fiber.get-service-source',
 )
 
+/** ServiceRegistry 在 Provider Effect 清理前登记依赖失效工作的包内协议。 */
+export const fiberBeforeUnload = Symbol(
+  '@nya/core/fiber.before-unload',
+)
+
 /** Service 按调用方服务地址过滤事件的包内协议，不从公共入口导出。 */
 export const serviceContextFilter = Symbol(
   '@nya/core/service.context-filter',
