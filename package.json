@@ -2,6 +2,14 @@
   "name": "nya",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fanfan-de/NyaCore.git"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "type": "module",
   "scripts": {
     "build": "npm run build --workspace @nya/core",
@@ -9,6 +17,8 @@
     "typecheck": "npm run typecheck --workspace @nya/core && npm run build --workspace @nya/core && npm run typecheck --workspace @nya/playground",
     "docs:check": "node scripts/check-docs.mjs",
     "check": "npm run docs:check && npm run typecheck && npm test",
+    "package:check": "npm run build && node scripts/check-package.mjs",
+    "release:check": "npm run check && node scripts/check-package.mjs",
     "dev:core": "npm run build --workspace @nya/core -- --watch",
     "dev:playground": "npm run dev --workspace @nya/playground",
     "playground": "npm run build --workspace @nya/core && npm run start --workspace @nya/playground"

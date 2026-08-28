@@ -2,12 +2,32 @@
   "name": "@nya/core",
   "version": "0.0.0",
   "description": "Core runtime for the Nya framework",
+  "keywords": [
+    "component-runtime",
+    "dependency-injection",
+    "lifecycle",
+    "typescript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fanfan-de/NyaCore.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/fanfan-de/NyaCore#readme",
+  "bugs": {
+    "url": "https://github.com/fanfan-de/NyaCore/issues"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "type": "module",
   "sideEffects": false,
   "scripts": {
     "build": "node scripts/clean-lib.mjs && tsc -p tsconfig.json",
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json"
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "prepublishOnly": "npm --prefix ../.. run release:check"
   },
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
@@ -19,8 +39,13 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib"
+    "lib",
+    "LICENSE",
+    "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@standard-schema/spec": "^1.1.0"
   }

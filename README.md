@@ -172,11 +172,13 @@ npm run check
 | `npm run typecheck` | 检查 Core、测试和 Playground 的类型 |
 | `npm run docs:check` | 检查 Markdown 结构、代码围栏和本地链接 |
 | `npm run check` | 依次运行文档、类型和测试检查 |
+| `npm run package:check` | 构建、打包并以外部消费者方式验证 `@nya/core` |
+| `npm run release:check` | 运行完整仓库检查和 npm 包发布前验证 |
 | `npm run playground` | 构建 Core 并运行全部示例场景 |
 | `npm run dev:core` | 监听 Core 源码并持续构建 |
 | `npm run dev:playground` | 监听并运行 Playground |
 
-代码变更完成前默认运行 `npm run check`；只修改 Markdown 时至少运行 `npm run docs:check`。
+代码变更完成前默认运行 `npm run check`；准备发布时运行 `npm run release:check`；只修改 Markdown 时至少运行 `npm run docs:check`。
 
 ## 文档
 
@@ -195,7 +197,7 @@ Context 拦截、callable Service、mixin、Logger、Loader 和 HMR 仍属于目
 
 ## 许可证
 
-本项目采用 MIT License。
+本项目采用 [MIT License](./LICENSE)。
 
 ## 贡献
 
@@ -204,5 +206,5 @@ Context 拦截、callable Service、mixin、Logger、Loader 和 HMR 仍属于目
 提交前请运行：
 
 ```bash
-npm run check
+npm run release:check
 ```
