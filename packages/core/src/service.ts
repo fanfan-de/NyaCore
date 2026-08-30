@@ -5,6 +5,8 @@ import type { Disposer } from './disposable.js'
 import type { Fiber } from './fiber.js'
 import { FiberState } from './fiber.js'
 import type { ResolvedInject } from './component.js'
+import { withEffectDescriptor } from './diagnostics.js'
+import type { EffectDescriptor } from './diagnostics.js'
 import type { IsolationLabel } from './symbols.js'
 import {
   contextFilter,
@@ -478,7 +480,17 @@ export class ServiceRegistry {
     let state: ServiceImplementationState | undefined
     let registeredSlot: ServiceSlot | undefined
     let registeredImplementation: ServiceImplementation<Value> | undefined
-    const disposeOwner = context.fiber.effect(() => {
+    const label = `ctx.provide(${JSON.stringify(name)})`
+    const descriptor: EffectDescriptor = {
+      type: 'service-provider',
+      label,
+      serviceName: name,
+      ownerFiberId: context.fiber.id,
+    }
+    const disposeOwner = withEffectDescriptor(
+      context.fiber,
+      descriptor,
+      () => context.fiber.effect(() => {
       const slot = this.#getSlot(context, name)
       registeredSlot = slot
       const current = slot.implementation
@@ -500,7 +512,9 @@ export class ServiceRegistry {
         check,
       }
       registeredImplementation = implementation
+      descriptor.implementationId = implementation.id
       const source = this.#getDependencySource(context)
+      descriptor.sourceFiberId = source.context.fiber.id
       if (!this.#isSourceCurrent(source, true)) {
         throw new Error('inactive Service provider Context')
       }
@@ -525,15 +539,23 @@ export class ServiceRegistry {
         implementation,
         state!,
       )
+      const hookMetadata = {
+        label,
+        serviceName: name,
+        ownerFiberId: context.fiber.id,
+        sourceFiberId: source.context.fiber.id,
+      }
       state.detachSource = source.context.fiber[fiberBeforeUnload](
         invalidate,
         finalize,
+        hookMetadata,
       )
       if (source.context.fiber !== context.fiber) {
         try {
           state.detachOwner = context.fiber[fiberBeforeUnload](
             invalidate,
             finalize,
+            hookMetadata,
           )
         } catch (error) {
           state.detachSource()
@@ -602,7 +624,8 @@ export class ServiceRegistry {
           )
         }
       }
-    }, `ctx.provide(${JSON.stringify(name)})`)
+      }, label),
+    )
     if (state) state.disposeOwner = disposeOwner
 
     // 内部 Effect disposer 需要避免 finalizer 自等待；公开句柄仍保持普通

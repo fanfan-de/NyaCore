@@ -8,6 +8,7 @@
 | --- | --- | --- | --- |
 | 快速理解当前架构 | [架构总览](./architecture.md) | Explanation | Current |
 | 理解当前运行时 | [核心概念](./concepts.md) | Explanation | Current |
+| 理解 Logger 与诊断边界 | [ADR-0005](./adr/0005-runtime-observability.md) | ADR | Accepted |
 | 了解目标架构 | [核心设计](./design.md) | Specification | Proposed |
 | 查看技术决策 | [架构决策记录](./adr/README.md) | ADR | 按条目确定 |
 | 编写或维护文档 | [文档贡献指南](./contributing.md) | How-to | Current |
@@ -22,8 +23,8 @@
 
 判断当前版本实际做什么时，按以下证据核对：
 
-1. `packages/core/src/` 中的实现与导出类型；
-2. `packages/core/tests/` 中可重复运行的行为测试；
+1. `packages/core/src/` 与 `packages/logger-console/src/` 中的实现和导出类型；
+2. 相应包测试中可重复运行的行为测试；
 3. `docs/concepts.md` 中对上述行为的解释。
 
 如果概念文档与源码或测试不一致，应把它视为文档漂移并修正；如果测试与声明的公共契约不一致，应先明确这是实现缺陷还是契约变更。
@@ -64,3 +65,4 @@
 - 文档修改规范和检查方式见[文档贡献指南](./contributing.md)。
 - 新建决策记录时，从 [ADR 模板](./adr/0000-template.md)复制结构并分配下一个编号。
 - 当前文档体系的建立原因记录在 [ADR-0001](./adr/0001-repository-documentation.md)。
+- Logger 不影响生命周期、1000 条缓冲、诊断保留范围和 console 包边界记录在 [ADR-0005](./adr/0005-runtime-observability.md)。

@@ -7,7 +7,7 @@
 
 本文解释 Nya Core 当前代码中的核心概念、概念之间的关系，以及这些概念在生命周期中的实际行为。它面向第一次阅读代码的开发者，也可以作为编写组件时的心智模型。
 
-本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject、严格服务隔离、Service 调用方 Context 追踪、隔离事件过滤、动态依赖、Event 和同步配置生命周期已经可用；Context 拦截、callable Service、Logger、Loader 和 HMR 等能力仍属于后续设计目标，详见 [核心设计](./design.md)。
+本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject、严格服务隔离、Service 调用方 Context 追踪、隔离事件过滤、动态依赖、Event、同步配置生命周期、Logger 和 Effect 诊断已经可用；Context 拦截、callable Service、Loader 和 HMR 等能力仍属于后续设计目标，详见[核心设计](./design.md)。
 
 ## 1. 一句话理解 Nya Core
 
@@ -50,6 +50,8 @@ Nya Core 是一个**由动态服务依赖驱动，并能追踪组件副作用、
 | Effect | 一次资源创建以及与之配对的撤销操作 | 不长于所属 Fiber | `EffectScope` |
 | Disposer | 执行撤销操作的函数 | 可被手动或自动调用 | `() => void \| Promise<void>` |
 | CleanupSource | 组件或 Effect 向运行时提交清理方法的协议 | 在启动阶段被收集 | 空值、Disposer、Promise 或迭代器 |
+| Logger | 当前 Root 内的结构化日志视图 | 与 Root 运行时相同 | `ctx.logger`、`LogRecord` |
+| Diagnostic Snapshot | 当前 run 与最近失败 run 的只读资源视图 | 每次检查时新建 | `fiber.inspect()` |
 | Registry | 组件 Runtime 与 Fiber 的根级索引 | 与根 Context 相同 | `Registry` |
 | Component Runtime | 同一个组件入口共享的运行元数据 | 存在实例时有效 | `ComponentRuntime` |
 | Root Context | 一棵运行时树的入口 | 可反复安装和清空组件 | `new Context()` |
@@ -353,6 +355,61 @@ app.database === database
 在混合 Context 上继续调用 `extend()` 或 `isolate()` 时，派生结果会成为后续下游 Service 的新调用方视图，同时保留当前 Service 的提供方依赖来源。通过混合 Context 安装的新组件会清除这项调用帧，改用组件自己的 `inject` 和快照。Root 提供方没有组件快照，其依赖读取在当前 Root run 内保持实时且不受 `inject` 限制；Root 重置后旧 facade 同样失效。
 
 上述调用身份、资源归属和代理限制记录在 [ADR-0004](./adr/0004-service-caller-context.md) 中；[Playground 场景](../playground/src/scenarios/service-caller-context.ts)演示了异步调用、Effect 所有权与隔离事件过滤。Context 拦截配置、callable Service、`Service.extend` 和 mixin 尚未实现。
+
+### 5.8 Context Logger
+
+每个 Context 都提供只读 `logger`。它绑定当前 Fiber，因此普通用户日志会自动带上 Fiber ID、组件名称、状态和 run ID；在 Service 方法中访问 `this.ctx.logger` 时，归属调用方 Context，而不是 Service 提供方。
+
+```ts
+type LogLevel = 'debug' | 'info' | 'warn' | 'error'
+
+interface Logger {
+  readonly name: string
+  child(name: string): Logger
+  debug(message: string, data?: unknown): void
+  info(message: string, data?: unknown): void
+  warn(message: string, data?: unknown): void
+  error(error: unknown): void
+  error(message: string, data?: unknown): void
+  records(): readonly LogRecord[]
+  subscribe(sink: LogSink, options?: LogSubscribeOptions): Disposer
+}
+```
+
+```ts
+context.logger.info('worker ready', { port: 3000 })
+
+const databaseLogger = context.logger.child('database')
+databaseLogger.debug('query started')
+databaseLogger.error(new Error('query failed'))
+```
+
+`child('database')` 只派生日志名称，例如 `worker/database`，不会创建 Context 或 Fiber。`logger` 是 Context 保留属性，`extend()` 不能覆盖它；如果应用确实提供名为 `logger` 的 Service，可使用 `context.get('logger')` 显式读取，不会替换诊断 Logger。
+
+每条 `LogRecord` 包含单调递增的 `sequence`、ISO `timestamp`、`level`、`code` / `event`、`name` / `loggerName`、消息、可选 data/error，以及 `fiberId`、`componentName`、`fiberState` 和可选 run、阶段、停止原因、Effect 路径。停止原因的公开联合类型是：
+
+```text
+dependency-change
+config-update
+restart
+stale-start
+dispose
+root-restart
+```
+
+每棵 Root Context 有独立日志中心。`records()` 返回该 Root 最近最多 1000 条结构化记录；记录先进入缓冲，再同步通知订阅者。订阅支持 `replay` 和 `minLevel`：
+
+```ts
+const stop = context.logger.subscribe(
+  (record) => {
+    // record 包含序号、时间、级别、事件代码和 Fiber/run 元数据。
+    sendToCollector(record)
+  },
+  { replay: true, minLevel: 'warn' },
+)
+```
+
+订阅本身是当前调用方 Fiber 的 `logger-subscriber` Effect；卸载、回滚或手动调用 `stop()` 都会将其移除。sink 第一次抛错后也会自动移除，错误只以 `logger/sink-failed` 写入缓冲且不会再次派发。无论用户日志还是 sink 失败，都不会改变 Fiber 状态、替换组件错误或延迟生命周期。
 
 ## 6. Fiber：单次安装的生命周期控制器
 
@@ -841,33 +898,105 @@ await fiber.dispose()
 
 如果 `apply()`、异步初始化或 CleanupSource 收集失败，`await fiber` 会拒绝，已经成功登记的资源会先被回滚。
 
-## 14. 常见混淆
+## 14. Logger 与运行时诊断
 
-### 14.1 Component 与 Fiber
+### 14.1 结构化日志
+
+Logger 提供 `debug`、`info`、`warn` 和 `error` 四个级别。普通调用的事件代码是 `log`；Core 还会写入结构化生命周期事件：
+
+| 事件代码 | 含义 |
+| --- | --- |
+| `fiber/state` | Fiber 状态变化及停止原因 |
+| `fiber/config-failed` | 配置校验失败 |
+| `fiber/start-failed` | 组件入口或启动 Effect 失败 |
+| `fiber/cleanup-failed` | 本轮运行清理失败 |
+| `effect/state` | Effect 创建、激活或清理状态变化 |
+| `effect/setup-failed` | 单个 Effect setup 失败 |
+| `effect/cleanup-failed` | 单个 Effect cleanup 失败 |
+| `logger/sink-failed` | 日志 sink 抛错并被自动移除 |
+
+自动记录附带生命周期阶段、停止原因和失败 Effect 路径等适用字段。Core 先完成实际状态更新，再旁路记录状态；一次生命周期失败只产生一条错误汇总。生命周期 Promise 仍抛出原错误或原有顺序的 `AggregateError`，日志不会改变错误身份和清理顺序。
+
+### 14.2 Effect 诊断树
+
+`fiber.inspect()` 返回该时刻新建并冻结的 `FiberDiagnosticSnapshot`。快照包含稳定 Fiber ID、名称、状态、run ID、状态开始时间、当前运行的 Effect 树、通过组件安装 Effect 连接的子 Fiber，以及最近一次失败 run：
+
+```ts
+try {
+  await worker.dispose()
+} catch (error) {
+  const snapshot = worker.inspect()
+  report(snapshot)
+}
+```
+
+顶层字段是 `fiberId`、`componentName`、`state`、可选 `runId`、`stateSince`、`effects`、`children` 和可选 `lastFailure`；同时保留 `id` / `name` 作为 Fiber ID / 组件名的简写。`lastFailure` 包含失败时的 Fiber/run、发生时间、阶段、可选停止原因、原始 `error`、全部 `effectPaths`、结构化 `failures` 和当时的 Effect 树。嵌套失败按具体叶节点优先归因；若祖先只是在传播同一个错误，不会重复成为汇总路径。
+
+Effect 节点提供稳定 ID、类型、标签、状态、创建时间、状态更新时间和子节点。当前结构化类型是：
+
+```text
+custom
+component-entry
+component-install
+event-listener
+service-provider
+logger-subscriber
+```
+
+节点状态是 `starting`、`active`、`disposing`、`disposed`、`setup-failed` 或 `cleanup-failed`。事件监听节点还会说明事件名和 global 状态，服务节点会说明服务名及 owner/source Fiber，组件安装节点会关联子 Fiber。
+
+同步 setup 中创建的内层 Effect 显示为父节点的子级；跨过 `await` 后创建的 Effect 仍按当前异步上下文语义成为本轮 run 的顶层节点。成功清理的节点从活动树移除；失败节点、失败阶段、停止原因、原始错误和具体 Effect 路径保留在最近失败快照。`failures[].stage` 区分 `setup`、`cleanup`、`service-invalidate` 和 `service-finalize`；同一 Service 的两个卸载阶段都失败时会保留两条证据。每个 Fiber 只保存当前 run 与最近一次失败 run，不保存无限历史。
+
+异步 cleanup 尚未完成时，节点保持 `disposing`，状态时间可帮助判断它持续了多久。这只是证据，不等于运行时已经证明泄漏：Core 不设置统一清理超时，也不会自动中止 cleanup。
+
+诊断只能看到通过 Nya 所有权协议登记的资源，包括 `context.effect()`、事件监听、Service 注册、Logger 订阅和组件安装。直接创建但没有通过 Effect 返回清理方法的定时器、文件句柄、连接或第三方库资源，Core 无法自动发现。
+
+上述旁路语义、保留上限和观测边界记录在 [ADR-0005](./adr/0005-runtime-observability.md) 中。
+
+### 14.3 控制台输出
+
+Core 不直接决定格式或调用 `globalThis.console`。需要默认控制台适配时，显式安装独立包的 Component：
+
+```ts
+import { ConsoleLogger } from '@nya/logger-console'
+
+const loggerFiber = app.installComponent(ConsoleLogger, {
+  level: 'info',
+  replay: true,
+  timestamps: true,
+  target: globalThis.console,
+})
+```
+
+`ConsoleLoggerOptions` 的默认值是 `level: 'info'`、`replay: true`、`timestamps: true` 和 `target: globalThis.console`。它按记录级别调用目标的 `debug` / `info` / `warn` / `error`，把结构化 data 和原 Error 作为独立参数传递，以保留 Error stack。导入包没有输出副作用；卸载 `loggerFiber` 后订阅立即停止。
+
+## 15. 常见混淆
+
+### 15.1 Component 与 Fiber
 
 Component 是定义，Fiber 是一次安装。把状态保存在可复用 Component 定义上，会让多次安装意外共享状态；安装独有状态应放在入口局部变量、配置、class 实例或由该 Fiber 拥有的资源中。
 
-### 14.2 Context 与 Fiber
+### 15.2 Context 与 Fiber
 
 Context 是操作运行时的作用域入口，Fiber 是生命周期和资源账本。`context.fiber` 指向当前实例，但二者不是同一个对象。
 
-### 14.3 Effect 与 Event
+### 15.3 Effect 与 Event
 
 Effect 表示需要撤销的副作用；Event 表示一件事情已经发生。监听器注册是需要撤销的副作用，因此 Event 系统使用 Effect 把监听器归属到订阅方 Fiber，但事件本身不是 Effect。
 
-### 14.4 `await fiber` 与组件退出
+### 15.4 `await fiber` 与组件退出
 
 `await fiber` 等待当前启动、依赖协调或卸载任务稳定，不表示组件已经退出。启动成功后，Fiber 通常处于 ACTIVE；依赖失效会让它清理并回到 PENDING，`dispose()` 或父 Fiber 清理才会永久销毁它。
 
-### 14.5 PENDING 与依赖等待
+### 15.5 PENDING 与依赖等待
 
 `PENDING` 既可能是安装后协调任务尚未开始的瞬时状态，也可能是稳定的依赖等待状态。对缺少必需服务的 Fiber 执行 `await fiber` 会等待当前协调操作稳定后正常返回，但 Fiber 仍保持 `PENDING`；未来服务出现时，它会收到通知并启动。
 
-### 14.6 Context 作用域与安全沙箱
+### 15.6 Context 作用域与安全沙箱
 
 Context 的原型链作用域以及 `isolate()` 用于组织服务可见性和运行时所有权，不隔离文件系统、网络、环境变量或 JavaScript 全局对象。不可信代码需要真正的进程或容器沙箱。
 
-## 15. 当前实现与后续设计的边界
+## 16. 当前实现与后续设计的边界
 
 | 能力 | 当前状态 |
 | --- | --- |
@@ -891,12 +1020,13 @@ Context 的原型链作用域以及 `isolate()` 用于组织服务可见性和�
 | Service 调用方 Context 追踪 | 已实现 |
 | Service `thisArg` 隔离事件过滤 | 已实现 |
 | Context 拦截、callable Service 与 mixin | 尚未实现 |
-| Logger 与 Effect 树诊断 | 尚未实现 |
-| Loader、HMR 和外围生态 | 不属于当前 Core 阶段 |
+| Logger、结构化生命周期日志与 Effect 树诊断 | 已实现 |
+| `@nya/logger-console` | 已实现为显式安装的外围组件 |
+| Loader、HMR 和其他外围生态 | 不属于当前 Core 阶段 |
 
 阅读源码或撰写示例时，应以这条边界为准。设计文档描述的是预期终态；本文描述的是当前可以依赖的基础心智模型。
 
-## 16. 贡献者需要维护的不变量
+## 17. 贡献者需要维护的不变量
 
 修改核心运行时行为时，至少应保持以下约束：
 
@@ -917,5 +1047,7 @@ Context 的原型链作用域以及 `isolate()` 用于组织服务可见性和�
 15. Service 调用视图只能绑定调用方 Context，不能临时修改原实例的提供方 Context。
 16. Service 的隔离事件过滤必须同时匹配 Root 和该服务名的隔离标签。
 17. 来源 Provider 或实际 owner 停止时，跨 Fiber 提供的下游服务必须先完成消费者失效与 facade/slot 关闭，再开始任一端的普通 Effect 清理。
+18. Logger 与 sink 失败不能改变 Fiber 状态、生命周期 Promise、原错误身份或 Effect 清理顺序。
+19. 诊断快照不能暴露可反向修改运行时的对象，也不能无限保留成功历史。
 
 这些不变量比某个类的内部字段布局更重要。内部实现可以演进，但公开语义不应在没有相应设计和测试更新的情况下悄然改变。

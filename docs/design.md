@@ -7,7 +7,7 @@
 
 本文记录 Nya 核心运行时的目标设计。状态为 Proposed 表示它可以指导讨论和实现，但不能单独证明某项能力已经存在；当前可观察行为以源码、导出类型、测试和[核心概念指南](./concepts.md)为证据。某段设计被接受后，实现、测试和公开 API 应逐步与其语义一致。
 
-当前已落地 Component、Context、Fiber、Effect、Registry、最小 Service 基类、Inject、严格服务隔离、Service 调用方 Context 追踪、隔离事件过滤、Event 和同步 Config 生命周期。本文中的 Context 拦截、callable Service、mixin、Logger、Loader 和 HMR 仍是 Proposed，不应从目标设计推断它们已经可用。
+当前已落地 Component、Context、Fiber、Effect、Registry、最小 Service 基类、Inject、严格服务隔离、Service 调用方 Context 追踪、隔离事件过滤、Event、同步 Config 生命周期、Logger 和 Effect 诊断。本文中的 Context 拦截、callable Service、mixin、Loader 和 HMR 仍是 Proposed，不应从目标设计推断它们已经可用。
 
 Nya 借鉴 Cordis 的设计思想，但不以逐文件复制 Cordis 为目标。第一阶段追求的是复现它最重要的运行语义：上下文作用域、动态服务依赖、组件生命周期和副作用回收。
 
@@ -681,7 +681,7 @@ Loader 可以在 Core 之外负责读取 YAML 或 JSON、保存修改以及把�
 
 ## 14. 错误处理与日志
 
-> 实施状态：部分 Current。Fiber 的失败隔离、错误暴露和回滚已有实现；Logger、结构化日志和 Effect 树诊断仍是 Proposed。
+> 实施状态：Current。Fiber 失败隔离、结构化 Logger、生命周期日志和 Effect 树诊断已经实现；约束见 [ADR-0005](./adr/0005-runtime-observability.md)。
 
 ### 14.1 组件错误
 
@@ -690,16 +690,18 @@ Loader 可以在 Core 之外负责读取 YAML 或 JSON、保存修改以及把�
 - 其他无依赖关系的 Fiber 应继续运行。
 - `await fiber` 应向调用者暴露启动错误。
 - 错误同时交给当前 Context 的 logger。
+- Logger 只提供补充证据，不得替换生命周期 Promise 暴露的原错误。
 
 ### 14.2 清理错误
 
 - 清理错误必须记录，但不得阻止其他资源继续清理。
 - Fiber 的 `dispose()` 应尽可能完成所有清理并收敛到 DISPOSED。
-- logger 本身失败属于无法在同一层再次记录的严重错误，可以向进程边界传播。
+- 多项清理错误继续按原顺序使用 `AggregateError` 汇总；日志不得改变这个顺序。
+- sink 第一次抛错后立即移除，并把 `logger/sink-failed` 仅写入 Root 缓冲；Logger 和 sink 错误不得传播到组件生命周期。
 
 ### 14.3 调试信息
 
-每个 Effect 应携带可读标签，例如：
+每个 Effect 携带可读标签和结构化类型，例如：
 
 ```text
 ctx.on("record/created")
@@ -708,7 +710,13 @@ ctx.installComponent("worker")
 ctx.timeout()
 ```
 
-Fiber 应能暴露 Effect 树，用于诊断资源泄漏和组件卸载问题。Loader 还可以向错误栈追加配置条目位置。
+`fiber.inspect()` 暴露新建且冻结的只读诊断快照，用于定位资源清理和组件卸载问题。快照包含当前 run、通过安装 Effect 连接的子 Fiber，以及最近一次失败 run；失败信息保留阶段、停止原因、原始错误与 Effect 路径。成功结束的更早历史不保留。
+
+Effect 节点的结构化类型为 `custom`、`component-entry`、`component-install`、`event-listener`、`service-provider` 和 `logger-subscriber`，状态为 `starting`、`active`、`disposing`、`disposed`、`setup-failed` 或 `cleanup-failed`。事件名、服务名和 owner/source Fiber 等身份来自登记时的结构化描述，不能从展示标签反向解析。失败证据按叶节点优先归因，并用 `setup`、`cleanup`、`service-invalidate`、`service-finalize` 区分阶段；同一 Service 的两个卸载阶段可以同时保留。
+
+每个 Root 的 Logger 缓冲固定保留最近 1000 条记录。所有记录先写缓冲，再同步通知 sink；订阅归调用方 Fiber 所有。Logger 记录和诊断快照均为旁路设施，不能参与状态转换、清理顺序或错误选择。
+
+正在等待 cleanup Promise 的节点保持 `disposing` 并暴露状态时间。Core 不设置统一清理超时，也不把 `disposing` 自动判定为泄漏。它只能看到通过 `context.effect()`、事件、Service、Logger 订阅和组件安装登记的资源；未登记的宿主句柄无法自动发现。Loader 还可以在 Core 记录之外向错误栈追加配置条目位置。
 
 ## 15. 并发与一致性规则
 
@@ -763,7 +771,7 @@ packages/core/src/
 
 文件划分可以随实现调整，但职责边界必须保持。
 
-### 17.2 后续扩展包
+### 17.2 外围扩展包
 
 与 Cordis 类似，下列能力应保持为 Core 之外的组件：
 
@@ -776,6 +784,8 @@ packages/core/src/
 @nya/logger-console  控制台日志输出
 create-nya           项目脚手架
 ```
+
+其中 `@nya/logger-console` 已经 Current；其他条目仍是 Proposed。console 包通过显式安装 Component 订阅 Core 结构化记录，Core 导入和 console 包导入都不会自动输出。
 
 这种分层保证 Core 不依赖文件系统、YAML、文件监听器或 Node 私有模块加载器。
 
@@ -824,18 +834,16 @@ create-nya           项目脚手架
 
 ### 阶段三：事件与配置
 
-> 实施状态：部分 Current。Event 和配置生命周期已完成；Logger 仍未实现。
+> 实施状态：Current。Event、配置生命周期、Logger 和 Effect 诊断均已完成。
 
-已实现：
+实现：
 
 - `on`、`once` 和各派发模式；
 - Standard Schema 配置校验；
 - `fiber.update()` 和 `restart()`；
 - Fiber 启动失败隔离、错误暴露与回滚。
-
-尚未实现：
-
-- Logger、结构化日志和 Effect 树诊断。
+- Logger、结构化生命周期日志和 Root 内 1000 条缓冲；
+- `fiber.inspect()`、Effect 树以及当前 run 与最近失败 run 的诊断快照。
 
 ### 阶段四：空间组合
 
@@ -855,9 +863,9 @@ create-nya           项目脚手架
 
 ### 阶段五：外围生态
 
-> 实施状态：Proposed。
+> 实施状态：部分 Current。`@nya/logger-console` 已实现；其余包仍是 Proposed。
 
-实现 Loader、Include、Group、Timer 和 HMR。外围包只能依赖 Core 的公开协议，不得通过修改 Core 私有状态工作。
+`@nya/logger-console` 作为显式安装的 Component 订阅 Core Logger，导入没有输出副作用，卸载后停止输出。后续实现 Loader、Include、Group、Timer 和 HMR。外围包只能依赖 Core 的公开协议，不得通过修改 Core 私有状态工作。
 
 ## 19. 最小测试矩阵
 
@@ -907,6 +915,16 @@ create-nya           项目脚手架
 - Service 作为 `thisArg` 时，隔离过滤不会把事件发送到错误作用域。
 - `global` 监听器跳过 Service 隔离过滤。
 
+### Logger 与诊断
+
+- 四个日志级别、child 命名空间、1000 条缓冲、replay 与最小级别过滤符合定义。
+- Root 间日志隔离；Service 方法日志归属调用方 Context。
+- sink 失败后移除且不改变 Fiber；自动日志不替换启动或清理错误。
+- 自定义 Effect、入口、监听器、服务、Logger sink 和子组件显示正确的结构化类型与父子关系。
+- 清理进行中显示 `disposing`；FAILED 或 DISPOSED 后仍能检查最近失败 run。
+- 快照不能反向修改运行时，且只保留当前 run 与最近失败 run。
+- Console Logger 按级别路由、保留 Error 对象，并在卸载后停止输出。
+
 ## 20. 当前实现与目标设计的衔接
 
 当前 `packages/core/src/context.ts` 已经不再是只验证原型链的原型。已落地的运行时基础包括：
@@ -920,15 +938,16 @@ create-nya           项目脚手架
 - Service 调用方 Context Proxy 与隔离事件过滤已实现；
 - 最小 Service 基类、`Service.init` 和 `Service.check` 已实现；
 - Standard Schema 同步校验、`fiber.update()`、`restart()` 和快速配置更新收敛已实现。
+- Context Logger、结构化生命周期记录、Effect 诊断树和最近失败快照已实现；
+- `@nya/logger-console` 已作为只依赖 Core 公开 API 的外围 Component 实现。
 
 当前与本文目标之间的主要差距是：
 
 - Context 拦截；
 - callable Service、高级 Service 协议和 mixin；
-- Logger、结构化错误上报和 Effect 树诊断；
 - Loader、Include、Group、Timer 和 HMR 等外围生态。
 
-因此，后续应当在已有生命周期协调器上继续完成空间组合和可观测性，而不是从阶段一重新开始。
+因此，后续应当在已有生命周期协调器和可观测性基础上继续完成空间组合与其他外围生态，而不是从阶段一重新开始。
 
 ## 21. 设计结论
 

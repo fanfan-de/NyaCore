@@ -12,6 +12,7 @@ Nya 是一个面向 TypeScript 的作用域组件运行时。它通过动态服�
 - 服务消失或被替换时，消费者会先清理旧运行，再等待或使用新实现；
 - 每次组件安装都有独立的 Context、Fiber、配置和资源所有权；
 - Effect、事件监听、服务注册和子组件会跟随所属 Fiber 自动清理；
+- 结构化日志和只读 Effect 树会保留失败路径，且不会改变组件原有错误；
 - 同名服务可以通过 Context 隔离在同一棵运行时树中并存；
 - 配置更新、手动重启和异步清理都通过同一个串行生命周期协调。
 
@@ -71,6 +72,20 @@ await ticker.dispose()
 
 `installComponent()` 会同步返回一个 Fiber。Fiber 是 thenable，`await fiber` 表示等待当前以及等待期间追加的生命周期转换达到稳定状态，并不表示等待组件永久结束。
 
+需要观察运行状态时，可直接使用当前 Context 的结构化 Logger，并在失败后检查 Fiber：
+
+```ts
+app.logger.info('clock installed')
+
+try {
+  await ticker.restart()
+} catch (error) {
+  console.dir(ticker.inspect(), { depth: null })
+}
+```
+
+`logger.records()` 在每棵 Root 中保留最近 1000 条记录；`fiber.inspect()` 返回当前 run 与最近失败 run 的冻结快照。两者都只旁路观察生命周期，不会替换启动或清理抛出的原错误。
+
 ## 核心模型
 
 一次安装可以概括为：
@@ -92,6 +107,7 @@ await ticker.dispose()
 | Service | 由组件提供、由其他组件通过 `inject` 声明依赖的具名能力 |
 | Event | 根运行时中的类型安全消息通道；监听器仍归订阅方 Fiber 所有 |
 | Registry | 索引组件定义对应的 Runtime 及其全部 Fiber 实例 |
+| Logger / Diagnostics | 记录结构化生命周期事实，并检查当前与最近失败的 Effect 树 |
 
 最重要的边界是：Context 负责“在哪里运行”，Fiber 负责“运行多久以及如何撤销”。Context 隔离只影响运行时解析空间，不是权限或安全沙箱。
 
@@ -128,6 +144,28 @@ await ticker.dispose()
 - 监听器注册自动归属于当前 Fiber，卸载或重启时不会泄漏；
 - 组件可通过 Standard Schema 声明同步配置校验与转换，并使用 `ValidationError` 读取问题详情。
 
+### Logger 与运行时诊断
+
+- `context.logger` 提供 `debug`、`info`、`warn`、`error`、child 命名空间、记录读取和生命周期托管订阅；
+- Fiber 状态、配置失败、启动失败和清理失败会形成结构化记录；每个 Root 最多保留最近 1000 条；
+- sink 抛错后会自动移除，不会改变 Fiber 状态、生命周期 Promise、原错误身份或 Effect 清理顺序；
+- `fiber.inspect()` 显示当前 run 的 Effect 树、子 Fiber 和最近失败 run；异步清理中的节点显示为 `disposing`；
+- 诊断只能看到通过 Effect、Event、Service、Logger 订阅或组件安装登记的资源，Core 不为 cleanup 设置统一超时；
+- 控制台输出由独立的 `@nya/logger-console` Component 提供，只有显式安装后才输出，导入包没有副作用。
+
+```ts
+import { ConsoleLogger } from '@nya/logger-console'
+
+const consoleLogger = app.installComponent(ConsoleLogger, {
+  level: 'info',
+  replay: true,
+})
+
+await consoleLogger
+// 不再需要输出时，卸载组件即可立即取消订阅。
+await consoleLogger.dispose()
+```
+
 ## API 速览
 
 | API | 用途 |
@@ -141,9 +179,11 @@ await ticker.dispose()
 | `context.provide(name, value)` / `context.get(name)` | 注册或显式读取服务 |
 | `context.on()` / `context.once()` | 注册生命周期托管的事件监听器 |
 | `context.emit()` / `parallel()` / `serial()` | 以不同模式派发事件 |
+| `context.logger` | 写入、读取或订阅当前 Root 的结构化日志 |
 | `fiber.update(config)` | 校验并提交新配置，等待生命周期稳定 |
 | `fiber.restart()` | 使用当前配置重建组件运行 |
 | `fiber.dispose()` | 永久销毁普通 Fiber；清空并复用根 Fiber |
+| `fiber.inspect()` | 获取当前 run 与最近失败 run 的冻结诊断快照 |
 
 完整公共导出以 [`packages/core/src/index.ts`](./packages/core/src/index.ts) 为准；当前行为的详细说明见[核心概念指南](./docs/concepts.md)。
 
@@ -152,6 +192,7 @@ await ticker.dispose()
 ```text
 NyaCore/
 ├── packages/core/       # @nya/core 源码、构建配置与测试
+├── packages/logger-console/ # 可选的 @nya/logger-console 输出组件
 ├── playground/          # 可运行示例与手动验证场景
 ├── docs/                # 架构、概念、设计和 ADR
 ├── scripts/             # 仓库级检查脚本
@@ -167,12 +208,12 @@ npm run check
 
 | 命令 | 说明 |
 | --- | --- |
-| `npm run build` | 构建 `@nya/core` |
-| `npm test` | 运行 Core 的 Vitest 测试 |
-| `npm run typecheck` | 检查 Core、测试和 Playground 的类型 |
+| `npm run build` | 构建 `@nya/core` 和 `@nya/logger-console` |
+| `npm test` | 运行两个发布包的 Vitest 测试 |
+| `npm run typecheck` | 检查两个发布包、测试和 Playground 的类型 |
 | `npm run docs:check` | 检查 Markdown 结构、代码围栏和本地链接 |
 | `npm run check` | 依次运行文档、类型和测试检查 |
-| `npm run package:check` | 构建、打包并以外部消费者方式验证 `@nya/core` |
+| `npm run package:check` | 构建、打包并以外部消费者方式验证两个发布包 |
 | `npm run release:check` | 运行完整仓库检查和 npm 包发布前验证 |
 | `npm run playground` | 构建 Core 并运行全部示例场景 |
 | `npm run dev:core` | 监听 Core 源码并持续构建 |
@@ -193,7 +234,7 @@ npm run check
 
 ## 当前边界
 
-Context 拦截、callable Service、mixin、Logger、Loader 和 HMR 仍属于目标设计，尚不能作为已实现能力使用。异步 Standard Schema 校验也不在当前版本支持范围内。
+Context 拦截、callable Service、mixin、Loader 和 HMR 仍属于目标设计，尚不能作为已实现能力使用。异步 Standard Schema 校验也不在当前版本支持范围内。运行时诊断不会自动发现绕过 Core 所有权协议创建的宿主资源，也不会以超时自动中断 cleanup。
 
 ## 许可证
 

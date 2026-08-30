@@ -10,7 +10,7 @@
 
 ## 1. 三十秒理解
 
-Nya Core 是一个嵌入宿主 JavaScript / TypeScript 进程的**作用域组件运行时**：Registry 将可复用的组件定义安装为独立的 Context 与 Fiber；Context 表达组件从哪个服务隔离视图观察和操作运行时，Fiber 管理该组件实例的状态、依赖快照、已校验配置和 Effect；ServiceRegistry 与配置版本共同驱动 Fiber 串行停止和重新启动，Service 调用视图保留消费者 Context，所有资源通过 Effect 所有权关系完成失败回滚和级联清理。
+Nya Core 是一个嵌入宿主 JavaScript / TypeScript 进程的**作用域组件运行时**：Registry 将可复用的组件定义安装为独立的 Context 与 Fiber；Context 表达组件从哪个服务隔离视图观察和操作运行时，Fiber 管理该组件实例的状态、依赖快照、已校验配置和 Effect；ServiceRegistry 与配置版本共同驱动 Fiber 串行停止和重新启动，Service 调用视图保留消费者 Context，所有资源通过 Effect 所有权关系完成失败回滚和级联清理。Root 内的 LoggerHub 和 `fiber.inspect()` 旁路呈现这些状态，但不参与生命周期结果。
 
 可以把核心模型压缩为：
 
@@ -36,11 +36,14 @@ flowchart LR
     subgraph Process["同一 JavaScript / TypeScript 进程"]
         Host["宿主应用"]
         Core["@nya/core<br/>作用域运行时"]
+        ConsoleLogger["@nya/logger-console<br/>可选控制台 sink"]
         Components["应用组件<br/>函数、class 或带 apply 的对象"]
 
         Host -->|"创建 Root Context<br/>安装或卸载组件"| Core
         Core -->|"派生 Context<br/>驱动启动、停止与重启"| Components
         Components -->|"声明 Inject、提供 Service<br/>登记 Effect 与 Event"| Core
+        ConsoleLogger -->|"显式安装并订阅结构化日志"| Core
+        ConsoleLogger -->|"格式化并输出"| Host
     end
 
     Resources["进程内或进程外资源<br/>定时器、监听器、连接、文件、后台任务"]
@@ -53,13 +56,14 @@ flowchart LR
 
 - Core 接收宿主已经提供的组件定义，不负责发现、导入或热替换模块；
 - Core 管理资源的生命周期协议，但不实现数据库、网络或业务服务本身；
+- Core 只观察通过其公开所有权协议登记的资源，不枚举宿主进程中的任意句柄，也不为 cleanup 设置统一超时；
 - Context 是进程内作用域协议，不是权限、安全或进程沙箱。
 
-Loader、配置文件、HMR、控制台输出和分布式生命周期不属于当前 `@nya/core`。
+Loader、配置文件、HMR、控制台输出和分布式生命周期不属于 `@nya/core`；其中控制台输出已经由独立的 `@nya/logger-console` Component 提供。
 
 ## 3. 核心构件
 
-每个 Root Context 建立一棵独立运行时树，并创建根 Fiber、Registry、ServiceRegistry 和 EventRegistry。派生 Context 通过原型链共享这些根级构件；由组件安装产生的 Context 会用本次安装对应的 Fiber 覆盖继承值。
+每个 Root Context 建立一棵独立运行时树，并创建根 Fiber、Registry、ServiceRegistry、EventRegistry 和 LoggerHub。派生 Context 通过原型链共享这些根级构件；由组件安装产生的 Context 会用本次安装对应的 Fiber 覆盖继承值，并取得绑定该 Fiber 的 Logger 视图。
 
 ```mermaid
 flowchart TB
@@ -67,11 +71,13 @@ flowchart TB
     Registry["Registry<br/>安装与 Runtime 索引"]
     Services["ServiceRegistry<br/>(服务名, 隔离标签) slot、实现与消费者"]
     Events["EventRegistry<br/>监听 Hook 与派发"]
+    Logs["LoggerHub<br/>1000 条结构化记录与 sink"]
     RootFiber["Root Fiber<br/>根资源所有者"]
 
     Root --> Registry
     Root --> Services
     Root --> Events
+    Root --> Logs
     Root --> RootFiber
 
     Definition["Component Definition"]
@@ -94,6 +100,7 @@ flowchart TB
     Context -->|"effect"| Fiber
     Context -->|"provide / get"| Services
     Context -->|"on / emit 等"| Events
+    Context -->|"logger"| Logs
 
     Services <-->|"捕获快照、订阅变化<br/>通知重新协调"| Fiber
     Services -->|"为 Service 绑定调用方 Context"| Facade["Service Proxy 视图"]
@@ -102,6 +109,8 @@ flowchart TB
     Fiber -->|"拥有本轮运行"| Effects["DisposableStack<br/>EffectScope 与 Disposer"]
     Events -->|"索引"| Hook["Event Hook"]
     Fiber -->|"拥有监听注册 Effect"| Hook
+    Fiber -->|"记录状态并提供 inspect"| Logs
+    Fiber -->|"旁路维护"| Diagnostics["当前 run + 最近失败 run<br/>冻结诊断快照"]
 ```
 
 | 构件 | 当前职责 | 关键证据 |
@@ -113,19 +122,22 @@ flowchart TB
 | DisposableStack / EffectScope | 收集 CleanupSource；提供幂等、后进先出、失败回滚和聚合错误清理 | [`disposable.ts`](../packages/core/src/disposable.ts) |
 | ServiceRegistry / Service | 注册具名服务、捕获依赖快照、维护反向订阅、绑定 Service 调用方 Context 并通知消费者 | [`service.ts`](../packages/core/src/service.ts) |
 | EventRegistry | 保存带订阅 Context 的 Hook，提供多模式派发和作用域过滤 | [`events.ts`](../packages/core/src/events.ts) |
+| LoggerHub / Logger | 在 Root 内缓冲结构化记录、隔离 sink 错误，并把 Logger 绑定到调用方 Fiber | [`logger.ts`](../packages/core/src/logger.ts) |
+| Fiber 诊断 | 旁路跟踪结构化 Effect 节点，生成当前 run 与最近失败 run 的冻结快照 | [`diagnostics.ts`](../packages/core/src/diagnostics.ts) |
 | 协议 Symbol | 支持 Context 识别、事件过滤和 Service 生命周期协议 | [`symbols.ts`](../packages/core/src/symbols.ts) |
 
 `index.ts` 是公共 API 边界；某个内部类存在不代表它一定是稳定契约，实际导出以 [`packages/core/src/index.ts`](../packages/core/src/index.ts) 为准。
 
-## 4. 五个互补的运行时视图
+## 4. 六个互补的运行时视图
 
-不能只用一棵“组件树”解释 Nya Core。当前运行时同时存在五种含义不同的关系：
+不能只用一棵“组件树”解释 Nya Core。当前运行时同时存在六种含义不同的关系：
 
 1. Context 派生关系表达空间与能力入口；
 2. Fiber 状态表达组件实例在时间上的运行阶段；
 3. Service 依赖图决定 Fiber 何时能够运行以及何时需要重启；
 4. Service 调用绑定决定方法使用哪个调用方空间与哪个提供方依赖快照；
 5. Effect 所有权关系决定资源何时以及以什么顺序撤销。
+6. Logger 与诊断快照旁路观察状态、错误和已登记资源，不参与状态机结果。
 
 下面三张并列的小图展示最容易混淆的结构关系：
 
@@ -158,7 +170,7 @@ flowchart LR
 - Service 变化只负责触发生命周期协调，最终资源清理仍由 Fiber 的 Effect 栈执行；
 - Event 是独立的多对多通信面，但每个监听器注册仍作为 Effect 归订阅方 Fiber 所有；Service 作为显式 `thisArg` 时才会按调用方服务地址过滤。
 
-因此，“空间—时间—依赖—调用—资源”比传统的分层或类继承图更能表达 Nya Core 的核心架构。
+因此，“空间—时间—依赖—调用—资源—观测”比传统的分层或类继承图更能表达 Nya Core 的核心架构。
 
 ## 5. Fiber 生命周期状态机
 
@@ -338,6 +350,28 @@ flowchart TB
 - 一个清理失败不会阻止其余独立清理尝试，多个错误使用 `AggregateError` 汇总；
 - 事件 Hook、服务注册和子组件安装都通过 Effect 接入同一清理模型。
 
+### 6.5 日志与诊断旁路
+
+日志和诊断读取既有生命周期事实，不成为新的状态机输入：
+
+```mermaid
+flowchart LR
+    Fiber["Fiber 状态机"] -->|"状态、阶段、原因"| Hub["Root LoggerHub<br/>最多 1000 条"]
+    Effects["结构化 Effect 节点"] -->|"状态、失败路径"| Fiber
+    Hub -->|"同步通知"| Sink["生命周期托管的 sink"]
+    Sink -.->|"抛错：移除并仅写缓冲"| Hub
+    Fiber -->|"inspect()"| Snapshot["冻结快照<br/>当前 run + 最近失败 run"]
+    Console["@nya/logger-console"] -->|"显式安装后订阅"| Hub
+```
+
+- 状态转换完成后才写入自动日志；Logger 和 sink 异常不能改变 Fiber 状态、生命周期 Promise 或原错误身份；
+- `logger.subscribe()` 本身是调用方 Fiber 的 Effect，组件卸载后不再接收记录；
+- 当前 Effect 树只表示仍在本轮运行中登记的节点，成功清理后移除；失败节点保留到最近失败 run；
+- `disposing` 节点和状态时间帮助定位长期清理，但 Core 不强制超时，也不自动宣称泄漏；
+- 快照是只读普通对象，不允许通过诊断 API 修改 Effect、Fiber 或内部索引。
+
+该边界由 [ADR-0005](./adr/0005-runtime-observability.md) 固定。
+
 ## 7. 架构不变量
 
 下列不变量比具体类字段或文件布局更稳定，架构变更必须通过源码和测试继续证明它们：
@@ -355,6 +389,8 @@ flowchart TB
 11. 服务地址必须同时包含 Root、服务名和隔离标签；缺失隔离实现时不能回退默认地址。
 12. Service 调用 Proxy 只能绑定调用方 Context，不能临时修改原 Service 实例；组件 Service 实现固定创建它的 Provider run 与快照，实现失效触发的消费者清理后旧 facade 失效，跨 Fiber 下游实现在来源与 owner run 的普通 Effect 清理前完成两阶段失效；Root 提供方在当前 run 内保留实时读取例外。
 13. Service 事件过滤必须同时匹配 Root 与该 Service 名称的隔离标签，`global` Hook 除外。
+14. Logger 写入和 sink 失败不能影响生命周期状态、清理顺序、Promise 结果或原错误身份。
+15. 诊断数据只旁路观察已登记资源，并以当前 run、最近失败 run 和 1000 条日志为有界保留范围。
 
 这些行为分别由[生命周期测试](../packages/core/tests/lifecycle.spec.ts)、[服务依赖测试](../packages/core/tests/service.spec.ts)、[服务隔离测试](../packages/core/tests/isolation.spec.ts)和[事件测试](../packages/core/tests/events.spec.ts)覆盖。完整概念解释见[核心概念指南](./concepts.md)。
 
@@ -367,9 +403,10 @@ flowchart TB
 | Component | 函数、class、对象定义；每次安装独立 Context 与 Fiber | Loader、模块发现与 HMR |
 | Config | 同步 Standard Schema 校验与转换；`fiber.config`、`update()`、`restart()` 与快速更新收敛 | Loader 读写、配置文件持久化与 HMR |
 | Service | `(服务名, 隔离标签)` 严格寻址；Inject 快照按地址驱动消费者启停；最小 `Service` 基类、调用方 Context Proxy、`init` 与 `check` | Context 拦截、callable Service、`extend` 与 mixin |
-| Effect | CleanupSource、失败回滚、幂等 LIFO 清理和聚合错误 | 可观察的 Effect 诊断树与更完整调试工具 |
-| Event | 生命周期绑定、Context 过滤和五种派发模式；Service `thisArg` 按调用方隔离地址过滤 | 更完整的运行时诊断事件 |
-| 包边界 | 当前只有 `@nya/core` 和 playground | `@nya/loader`、`@nya/hmr` 等外围包 |
+| Effect | CleanupSource、失败回滚、幂等 LIFO 清理、聚合错误和结构化诊断树 | 更丰富的宿主资源探针 |
+| Event | 生命周期绑定、Context 过滤和五种派发模式；Service `thisArg` 按调用方隔离地址过滤 | 更完整的业务级事件调试工具 |
+| Observability | Root 内 Logger、1000 条缓冲、生命周期事件、当前与最近失败快照 | 外部持久化、查询与告警后端 |
+| 包边界 | `@nya/core`、`@nya/logger-console` 和 playground；console 包只使用 Core 公开 API | `@nya/loader`、`@nya/hmr` 等其他外围包 |
 
 目标语义、非目标和建议的后续包见[核心设计](./design.md)。其中标记为 Proposed 的内容应在图中使用虚线或 `«proposed»`，并与本文的 Current 视图分开维护。
 

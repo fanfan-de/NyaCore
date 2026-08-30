@@ -5,6 +5,7 @@ import type { Disposer } from './disposable.js'
 import type { Fiber } from './fiber.js'
 import { FiberState } from './fiber.js'
 import { contextFilter } from './symbols.js'
+import { withEffectDescriptor } from './diagnostics.js'
 
 /**
  * 应用可以通过模块扩展补充事件签名：
@@ -97,6 +98,7 @@ export class EventRegistry {
     name: string | symbol,
     listener: EventCallback,
     options: boolean | EventOptions = {},
+    listenerKind: 'on' | 'once' = 'on',
   ): Disposer {
     if (context.root !== this.root) {
       throw new Error('cannot register an event listener from another Context tree')
@@ -137,25 +139,38 @@ export class EventRegistry {
       if (hooks.length === 0) this.#hooks.delete(name)
     }
 
-    const disposeEffect = context.fiber.effect(() => {
-      const current = hook!
-      let hooks = this.#hooks.get(name)
-      if (!hooks) {
-        hooks = []
-        this.#hooks.set(name, hooks)
-      }
+    const label = listenerKind === 'once'
+      ? `ctx.once(${formatEventName(name)})`
+      : `ctx.on(${formatEventName(name)})`
+    const disposeEffect = withEffectDescriptor(
+      context.fiber,
+      {
+        type: 'event-listener',
+        label,
+        eventName: name,
+        listenerKind,
+        global,
+      },
+      () => context.fiber.effect(() => {
+        const current = hook!
+        let hooks = this.#hooks.get(name)
+        if (!hooks) {
+          hooks = []
+          this.#hooks.set(name, hooks)
+        }
 
-      if (prepend) {
-        hooks.unshift(current)
-      } else {
-        hooks.push(current)
-      }
-      active = true
+        if (prepend) {
+          hooks.unshift(current)
+        } else {
+          hooks.push(current)
+        }
+        active = true
 
-      return () => {
-        unregister()
-      }
-    }, `ctx.on(${formatEventName(name)})`)
+        return () => {
+          unregister()
+        }
+      }, label),
+    )
 
     // EffectScope 的清理允许异步完成。这里先同步摘除监听器，确保手动取消、
     // once() 和监听器内部递归派发都不会在下一个微任务前再次看到旧监听器。
@@ -179,7 +194,7 @@ export class EventRegistry {
       fired = true
       void dispose()
       return Reflect.apply(listener, this, args)
-    }, options)
+    }, options, 'once')
     return dispose
   }
 

@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@nya/core": "*"
+    "@nya/core": "*",
+    "@nya/logger-console": "*"
   }
 }

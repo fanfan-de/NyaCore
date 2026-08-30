@@ -15,6 +15,22 @@ import {
   serviceSubscribe,
 } from './symbols.js'
 import { resolveConfig } from './config.js'
+import {
+  consumeEffectDescriptor,
+  FiberDiagnostics,
+  withEffectDescriptor,
+} from './diagnostics.js'
+import type {
+  EffectDiagnosticHandle,
+  FiberDiagnosticSnapshot,
+} from './diagnostics.js'
+import { logRuntime } from './logger.js'
+import type {
+  FiberStopReason,
+  LifecyclePhase,
+} from './logger.js'
+
+let fiberCounter = 0
 
 export enum FiberState {
   /** 组件实例存在，但当前缺少必需依赖。 */
@@ -66,15 +82,30 @@ function addFailure(errors: unknown[], candidate: unknown) {
 interface BeforeUnloadHook {
   readonly invalidate: Disposer
   readonly finalize?: Disposer
+  readonly path: readonly string[]
+  readonly diagnostic?: EffectDiagnosticHandle
+  readonly serviceName?: string
+  readonly ownerFiberId?: number
+  readonly sourceFiberId?: number
+}
+
+interface BeforeUnloadMetadata {
+  readonly label: string
+  readonly serviceName?: string
+  readonly ownerFiberId?: number
+  readonly sourceFiberId?: number
 }
 
 /** 管理一次组件安装，以及该实例随依赖变化产生的多轮运行。 */
 export class Fiber implements PromiseLike<void> {
+  /** 在当前进程内稳定且单调递增的 Fiber 身份。 */
+  readonly id = ++fiberCounter
   readonly context: Context
   readonly parent: Fiber | null
   readonly inject: ResolvedInject
 
   state: FiberState
+  stateSince = new Date().toISOString()
   error: unknown
 
   // ---------- 组件实例与安装输入 ----------
@@ -109,6 +140,7 @@ export class Fiber implements PromiseLike<void> {
   /** 每次成功进入启动流程都会使用新的 run 身份，防止旧 facade 复用新快照。 */
   #runCounter = 0
   #activeRun: number | undefined
+  #diagnosticRun: number | undefined
 
   /** 当前运行固定使用的配置版本；入口闭包持有对应的配置值。 */
   #activeConfigVersion: number | undefined
@@ -120,7 +152,14 @@ export class Fiber implements PromiseLike<void> {
   #cleanupBlocked = false
 
   #currentScope: EffectScope | undefined
+  #currentDiagnostic: EffectDiagnosticHandle | undefined
   #startupScopes: EffectScope[] | undefined
+
+  /** 诊断状态完全旁路于真正的 DisposableStack。 */
+  #diagnostics = new FiberDiagnostics()
+  #pendingStopReason: FiberStopReason | undefined
+  #lastCleanupReason: FiberStopReason | undefined
+  #disposeReason: FiberStopReason | undefined
 
   // ---------- 生命周期任务串行化 ----------
 
@@ -173,6 +212,11 @@ export class Fiber implements PromiseLike<void> {
   get name() {
     if (this.isRoot) return '<root>'
     return this.#runtime?.name ?? 'anonymous'
+  }
+
+  /** 当前活动 run；失败后保留最近失败 run 的身份，直到下一轮运行开始。 */
+  get runId() {
+    return this.#activeRun ?? this.#diagnosticRun
   }
 
   get isRoot() {
@@ -266,12 +310,25 @@ export class Fiber implements PromiseLike<void> {
   }
 
   /** 登记当前 run 的卸载前工作；返回函数只撤销登记，不执行回调。 */
-  [fiberBeforeUnload](invalidate: Disposer, finalize?: Disposer): Disposer {
+  [fiberBeforeUnload](
+    invalidate: Disposer,
+    finalize?: Disposer,
+    metadata: BeforeUnloadMetadata = { label: 'before-unload' },
+  ): Disposer {
     this.assertActive()
     const hooks = this.#beforeUnload
     if (!hooks) throw new Error('inactive context')
 
-    const hook = { invalidate, finalize }
+    const diagnostic = this.#currentDiagnostic
+    const hook = {
+      invalidate,
+      finalize,
+      path: diagnostic?.path ?? Object.freeze([metadata.label]),
+      diagnostic,
+      serviceName: metadata.serviceName,
+      ownerFiberId: metadata.ownerFiberId,
+      sourceFiberId: metadata.sourceFiberId,
+    }
     hooks.add(hook)
     let active = true
     return () => {
@@ -290,11 +347,79 @@ export class Fiber implements PromiseLike<void> {
 
     const scope = new EffectScope(label)
     const owner = this.#currentScope
+    const diagnostic = this.#diagnostics.createEffect(
+      consumeEffectDescriptor(this, label),
+      this.#currentDiagnostic,
+    )
+    logRuntime(
+      this.context,
+      'debug',
+      'effect/state',
+      `effect ${label} is starting`,
+      { phase: 'start', effectPath: diagnostic.path },
+    )
+
+    let disposeTask: Promise<void> | undefined
+    const dispose: Disposer = () => {
+      if (disposeTask) return disposeTask
+
+      const preserveFailure = diagnostic.state === 'setup-failed'
+        || diagnostic.state === 'cleanup-failed'
+      if (!preserveFailure) {
+        diagnostic.setState('disposing')
+        logRuntime(
+          this.context,
+          'debug',
+          'effect/state',
+          `effect ${label} is disposing`,
+          { phase: 'cleanup', effectPath: diagnostic.path },
+        )
+      }
+
+      disposeTask = Promise.resolve(scope.dispose()).then(
+        () => {
+          if (!preserveFailure) {
+            diagnostic.setState('disposed')
+            logRuntime(
+              this.context,
+              'debug',
+              'effect/state',
+              `effect ${label} was disposed`,
+              { phase: 'cleanup', effectPath: diagnostic.path },
+            )
+          }
+        },
+        (error: unknown) => {
+          diagnostic.setState('cleanup-failed', error)
+          if (
+            this.state === FiberState.ACTIVE
+            && !diagnostic.hasTransitionalAncestor()
+          ) {
+            const effectPaths = this.#diagnostics.failurePaths(diagnostic)
+            logRuntime(
+              this.context,
+              'error',
+              'effect/cleanup-failed',
+              `effect ${label} failed to clean up`,
+              {
+                data: { effectPaths },
+                error,
+                phase: 'cleanup',
+                effectPath: effectPaths[0] ?? diagnostic.path,
+              },
+            )
+          }
+          throw error
+        },
+      )
+      void disposeTask.catch(() => {})
+      return disposeTask
+    }
 
     if (owner) {
-      owner.add(scope.dispose)
+      owner.add(dispose)
     } else {
-      effects.add(scope.dispose)
+      effects.add(dispose)
     }
 
     // 启动阶段的数组会跨 await 保持存在，因此异步入口在 await 后创建的
@@ -302,14 +427,82 @@ export class Fiber implements PromiseLike<void> {
     this.#startupScopes?.push(scope)
 
     const previous = this.#currentScope
+    const previousDiagnostic = this.#currentDiagnostic
     this.#currentScope = scope
+    this.#currentDiagnostic = diagnostic
+    let setupFailureLogged = false
     try {
       scope.start(execute)
+    } catch (error) {
+      diagnostic.setState('setup-failed', error)
+      setupFailureLogged = true
+      if (
+        this.state === FiberState.ACTIVE
+        && !diagnostic.hasTransitionalAncestor()
+      ) {
+        const effectPaths = this.#diagnostics.failurePaths(diagnostic)
+        logRuntime(
+          this.context,
+          'error',
+          'effect/setup-failed',
+          `effect ${label} failed to start`,
+          {
+            data: { effectPaths },
+            error,
+            phase: 'start',
+            effectPath: effectPaths[0] ?? diagnostic.path,
+          },
+        )
+      }
+      throw error
     } finally {
       this.#currentScope = previous
+      this.#currentDiagnostic = previousDiagnostic
     }
 
-    return scope.dispose
+    void scope.ready.then(
+      () => {
+        if (diagnostic.state === 'starting') {
+          diagnostic.setState('active')
+          logRuntime(
+            this.context,
+            'debug',
+            'effect/state',
+            `effect ${label} is active`,
+            { phase: 'active', effectPath: diagnostic.path },
+          )
+        }
+      },
+      (error: unknown) => {
+        diagnostic.setState('setup-failed', error)
+        if (
+          !setupFailureLogged
+          && this.state === FiberState.ACTIVE
+          && !diagnostic.hasTransitionalAncestor()
+        ) {
+          const effectPaths = this.#diagnostics.failurePaths(diagnostic)
+          logRuntime(
+            this.context,
+            'error',
+            'effect/setup-failed',
+            `effect ${label} failed to start`,
+            {
+              data: { effectPaths },
+              error,
+              phase: 'start',
+              effectPath: effectPaths[0] ?? diagnostic.path,
+            },
+          )
+        }
+      },
+    )
+
+    return dispose
+  }
+
+  /** 返回与运行时断开的冻结快照；修改快照不会反向影响 Fiber。 */
+  inspect(): FiberDiagnosticSnapshot {
+    return this.#diagnostics.inspect(this)
   }
 
   /** 校验并提交新配置，经内部 waterfall 扩展点后等待运行稳定。 */
@@ -319,7 +512,13 @@ export class Fiber implements PromiseLike<void> {
     }
     this.#assertReusable()
 
-    const resolved = resolveConfig(this.#runtime?.Config, config)
+    let resolved: unknown
+    try {
+      resolved = resolveConfig(this.#runtime?.Config, config)
+    } catch (error) {
+      this.#recordFailure('config', error)
+      throw error
+    }
     const request = ++this.#updateRequest
     const operation = (async () => {
       // 让同一调用栈内的连续 update() 先登记请求序号，再进入扩展链。
@@ -353,6 +552,7 @@ export class Fiber implements PromiseLike<void> {
   /** 使用当前配置重新建立运行；根 Fiber 则清空整棵 Effect 树。 */
   async restart(): Promise<void> {
     if (this.isRoot) {
+      this.#disposeReason = 'root-restart'
       await this.dispose()
       return
     }
@@ -376,6 +576,7 @@ export class Fiber implements PromiseLike<void> {
       }
     }
 
+    this.#pendingStopReason = 'restart'
     this.#configVersion++
     this.#cleanupBlocked = false
     this.#failedTarget = undefined
@@ -388,6 +589,7 @@ export class Fiber implements PromiseLike<void> {
   dispose(): Promise<void> {
     if (this.#disposeOperation) return this.#disposeOperation
 
+    this.#disposeReason ??= 'dispose'
     this.#desiredSnapshot = undefined
     this.#disposeErrors = []
     this.#disposeOperation = this.#enqueue(() => this.#dispose())
@@ -471,6 +673,7 @@ export class Fiber implements PromiseLike<void> {
       if (this.#hasConfigError) {
         this.error = this.#configError
         this.#setState(FiberState.FAILED)
+        this.#recordFailure('config', this.#configError)
         throw this.#configError
       }
 
@@ -490,10 +693,14 @@ export class Fiber implements PromiseLike<void> {
           || this.#activeConfigVersion !== this.#configVersion
         )
       ) {
+        const stopReason: FiberStopReason = active.epoch !== desired?.epoch
+          ? 'dependency-change'
+          : this.#pendingStopReason ?? 'config-update'
         try {
-          await this.#unloadRun()
+          await this.#unloadRun(stopReason)
+          this.#pendingStopReason = undefined
         } catch (error) {
-          this.#failCleanup(error)
+          this.#failCleanup(error, stopReason)
           throw error
         }
         continue
@@ -526,7 +733,7 @@ export class Fiber implements PromiseLike<void> {
       } catch (error) {
         // 过期启动在内部卸载时也可能清理失败；此时不能静默启动新目标。
         if (this.state !== FiberState.FAILED) {
-          this.#failCleanup(error)
+          this.#failCleanup(error, this.#lastCleanupReason)
         }
         throw error
       }
@@ -542,18 +749,25 @@ export class Fiber implements PromiseLike<void> {
     if (!runtime || this.#disposeOperation) return
 
     this.#runEffects = new DisposableStack()
+    this.#diagnostics.beginRun()
     this.#beforeUnload = new Set()
     this.#activeSnapshot = snapshot
     this.#activeRun = ++this.#runCounter
+    this.#diagnosticRun = this.#activeRun
     this.#activeConfigVersion = configVersion
     this.#setState(FiberState.LOADING)
     this.error = undefined
     this.#startupScopes = []
 
     try {
-      this.effect(
-        () => this.#invoke(runtime, config),
-        `ctx.installComponent(${JSON.stringify(runtime.name ?? 'anonymous')})`,
+      const label = `ctx.installComponent(${JSON.stringify(runtime.name ?? 'anonymous')})`
+      withEffectDescriptor(
+        this,
+        {
+          type: 'component-entry',
+          label,
+        },
+        () => this.effect(() => this.#invoke(runtime, config), label),
       )
 
       for (let index = 0; index < this.#startupScopes.length; index++) {
@@ -587,6 +801,8 @@ export class Fiber implements PromiseLike<void> {
       this.#activeConfigVersion = undefined
       this.#failedTarget = this.#getTarget(snapshot, configVersion)
       this.#setState(FiberState.FAILED)
+      this.#recordFailure('start', failure)
+      this.#diagnostics.clearRun()
       throw failure
     } finally {
       this.#startupScopes = undefined
@@ -599,7 +815,7 @@ export class Fiber implements PromiseLike<void> {
       || this.#desiredSnapshot?.epoch !== snapshot.epoch
       || this.#configVersion !== configVersion
     ) {
-      await this.#unloadRun()
+      await this.#unloadRun('stale-start')
       return
     }
 
@@ -608,14 +824,17 @@ export class Fiber implements PromiseLike<void> {
   }
 
   /** 只撤销当前运行；保留 Fiber、Runtime 登记和依赖订阅以便再次激活。 */
-  async #unloadRun() {
+  async #unloadRun(stopReason: FiberStopReason) {
     if (!this.#runEffects && !this.#activeSnapshot && !this.#beforeUnload) {
       return
     }
 
-    this.#setState(FiberState.UNLOADING)
+    this.#lastCleanupReason = stopReason
+    this.#setState(FiberState.UNLOADING, stopReason)
+    let succeeded = false
     try {
       await this.#disposeRunEffects()
+      succeeded = true
     } finally {
       // 清理函数执行期间仍能读取旧 snapshot；全部清理结束后才解除固定。
       this.#runEffects = undefined
@@ -623,20 +842,35 @@ export class Fiber implements PromiseLike<void> {
       this.#activeSnapshot = undefined
       this.#activeRun = undefined
       this.#activeConfigVersion = undefined
+      if (succeeded) {
+        this.#diagnosticRun = undefined
+        this.#diagnostics.clearRun()
+      }
     }
 
-    if (!this.#disposeOperation) this.#setState(FiberState.PENDING)
+    if (!this.#disposeOperation) {
+      this.#setState(FiberState.PENDING, stopReason)
+    }
   }
 
   async #dispose() {
     if (this.state === FiberState.DISPOSED) return
 
-    this.#setState(FiberState.UNLOADING)
+    const stopReason = this.#disposeReason ?? 'dispose'
+    this.#setState(FiberState.UNLOADING, stopReason)
 
+    let cleanupFailure: unknown
     try {
-      await this.#unloadRun()
+      await this.#unloadRun(stopReason)
     } catch (error) {
+      cleanupFailure = error
       this.#recordDisposeError(error)
+      if (this.isRoot) {
+        // Root 会立刻建立一个可复用的新运行。必须在 ACTIVE 状态日志派发前
+        // 冻结并清空旧树，避免同步日志订阅器创建的新 Effect 混入失败快照。
+        this.#recordFailure('cleanup', error, stopReason)
+        this.#diagnostics.clearRun()
+      }
     } finally {
       this.#unsubscribe?.()
       this.#unsubscribe = undefined
@@ -649,13 +883,20 @@ export class Fiber implements PromiseLike<void> {
       if (this.isRoot) {
         // 根 Fiber 的 dispose 只清空整棵资源树，根 Context 之后仍可复用。
         this.#runEffects = new DisposableStack()
+        if (!cleanupFailure) this.#diagnostics.clearRun()
         this.#beforeUnload = new Set()
         this.#disposeOperation = undefined
+        this.#disposeReason = undefined
         this.error = undefined
-        this.#setState(FiberState.ACTIVE)
+        this.#setState(FiberState.ACTIVE, stopReason)
       } else {
-        this.#setState(FiberState.DISPOSED)
+        this.#setState(FiberState.DISPOSED, stopReason)
       }
+    }
+
+    if (cleanupFailure !== undefined && !this.isRoot) {
+      this.#recordFailure('cleanup', cleanupFailure, stopReason)
+      this.#diagnostics.clearRun()
     }
 
     const errors = this.#disposeErrors ?? []
@@ -692,16 +933,52 @@ export class Fiber implements PromiseLike<void> {
     const invalidationResults = await Promise.allSettled(
       hooks.map(async hook => hook.invalidate()),
     )
-    for (const result of invalidationResults) {
-      if (result.status === 'rejected') addFailure(errors, result.reason)
+    for (let index = 0; index < invalidationResults.length; index++) {
+      const result = invalidationResults[index]
+      if (result.status === 'rejected') {
+        const hook = hooks[index]
+        if (hook.diagnostic) {
+          hook.diagnostic.recordFailure('service-invalidate', result.reason)
+        } else {
+          this.#diagnostics.recordDetachedFailure(
+            hook.path,
+            'service-invalidate',
+            result.reason,
+            {
+              serviceName: hook.serviceName,
+              ownerFiberId: hook.ownerFiberId,
+              sourceFiberId: hook.sourceFiberId,
+            },
+          )
+        }
+        addFailure(errors, result.reason)
+      }
     }
 
     // 即使消费者清理失败，也必须关闭旧 frame/slot 后再进入 Effect 清理。
     const finalizationResults = await Promise.allSettled(
       hooks.map(async hook => hook.finalize?.()),
     )
-    for (const result of finalizationResults) {
-      if (result.status === 'rejected') addFailure(errors, result.reason)
+    for (let index = 0; index < finalizationResults.length; index++) {
+      const result = finalizationResults[index]
+      if (result.status === 'rejected') {
+        const hook = hooks[index]
+        if (hook.diagnostic) {
+          hook.diagnostic.recordFailure('service-finalize', result.reason)
+        } else {
+          this.#diagnostics.recordDetachedFailure(
+            hook.path,
+            'service-finalize',
+            result.reason,
+            {
+              serviceName: hook.serviceName,
+              ownerFiberId: hook.ownerFiberId,
+              sourceFiberId: hook.sourceFiberId,
+            },
+          )
+        }
+        addFailure(errors, result.reason)
+      }
     }
 
     try {
@@ -716,12 +993,35 @@ export class Fiber implements PromiseLike<void> {
     }
   }
 
-  #setState(state: FiberState) {
+  #setState(state: FiberState, stopReason?: FiberStopReason) {
     const oldState = this.state
     if (oldState === state) return
 
     this.state = state
+    this.stateSince = new Date().toISOString()
     this.context.root.services.onFiberStateChange(this, oldState, state)
+    const phase: LifecyclePhase = state === FiberState.LOADING
+      ? 'start'
+      : state === FiberState.ACTIVE
+        ? 'active'
+        : state === FiberState.DISPOSED
+          ? 'dispose'
+          : state === FiberState.UNLOADING
+            ? 'cleanup'
+            : stopReason
+              ? 'cleanup'
+              : 'active'
+    logRuntime(
+      this.context,
+      'info',
+      'fiber/state',
+      `${oldState} -> ${state}`,
+      {
+        data: { oldState, newState: state },
+        phase,
+        stopReason,
+      },
+    )
   }
 
   #assertReusable() {
@@ -730,16 +1030,49 @@ export class Fiber implements PromiseLike<void> {
     }
   }
 
-  #failCleanup(error: unknown) {
+  #failCleanup(error: unknown, stopReason?: FiberStopReason) {
     this.error = error
     this.#cleanupBlocked = true
     this.#failedTarget = undefined
     this.#recordDisposeError(error)
-    this.#setState(FiberState.FAILED)
+    this.#setState(FiberState.FAILED, stopReason)
+    this.#recordFailure('cleanup', error, stopReason)
+    this.#diagnostics.clearRun()
   }
 
   #recordDisposeError(error: unknown) {
     this.#disposeErrors?.push(error)
+  }
+
+  #recordFailure(
+    phase: Extract<LifecyclePhase, 'config' | 'start' | 'cleanup'>,
+    error: unknown,
+    stopReason?: FiberStopReason,
+  ) {
+    this.#diagnostics.captureFailure(
+      this,
+      phase,
+      error,
+      stopReason,
+    )
+    const effectPaths = this.#diagnostics.effectPaths()
+    const code = phase === 'config'
+      ? 'fiber/config-failed'
+      : phase === 'start'
+        ? 'fiber/start-failed'
+        : 'fiber/cleanup-failed'
+    const message = phase === 'config'
+      ? `component ${this.name} configuration failed`
+      : phase === 'start'
+        ? `component ${this.name} failed to start`
+        : `component ${this.name} failed to clean up`
+    logRuntime(this.context, 'error', code, message, {
+      data: { effectPaths },
+      error,
+      phase,
+      stopReason,
+      effectPath: effectPaths[0],
+    })
   }
 
   async #commitConfig(config: unknown, request: number) {
@@ -750,6 +1083,7 @@ export class Fiber implements PromiseLike<void> {
     this.#configInput = undefined
     this.#hasConfigError = false
     this.#configError = undefined
+    this.#pendingStopReason = 'config-update'
     this.#configVersion++
     this.#cleanupBlocked = false
     this.#failedTarget = undefined

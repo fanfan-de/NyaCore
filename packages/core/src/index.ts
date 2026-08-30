@@ -27,6 +27,25 @@ export type {
 } from './events.js'
 export { Fiber, FiberState } from './fiber.js'
 export type {
+  EffectDiagnosticSnapshot,
+  EffectDiagnosticState,
+  EffectDiagnosticType,
+  EffectFailureDiagnosticSnapshot,
+  EffectFailureStage,
+  FiberDiagnosticSnapshot,
+  FiberFailureDiagnosticSnapshot,
+} from './diagnostics.js'
+export type {
+  FiberStopReason,
+  LifecyclePhase,
+  Logger,
+  LogEventCode,
+  LogLevel,
+  LogRecord,
+  LogSink,
+  LogSubscribeOptions,
+} from './logger.js'
+export type {
   Component,
   Inject,
   ResolvedInject,

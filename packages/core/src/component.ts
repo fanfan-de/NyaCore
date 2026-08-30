@@ -30,18 +30,12 @@ export function resolveInject(inject?: Inject | null): ResolvedInject {
   return result
 }
 
-/**
- * 可安装的 Component 定义。
-
- * 与 Cordis 一致，Component 可以是函数、构造器，或带 `apply` 的对象。
- */
 export type Component<TConfig = unknown> =
   (
     | Component.Object<TConfig>
     | Component.Function<TConfig>
     | Component.Constructor<TConfig>
   ) & {
-    /** 为联合类型中的对象字面量保留 `apply` 参数的上下文类型。 */
     apply?: Component.Function<TConfig>
   }
 

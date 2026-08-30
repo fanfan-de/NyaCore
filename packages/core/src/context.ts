@@ -19,6 +19,8 @@ import {
   ServiceRegistry,
 } from './service.js'
 import type { IsolationLabel } from './symbols.js'
+import { getContextLogger } from './logger.js'
+import type { Logger } from './logger.js'
 import {
   contextFilter,
   contextIsolations,
@@ -33,6 +35,7 @@ const protectedProperties = new Set<PropertyKey>([
   'registry',
   'root',
   'services',
+  'logger',
 ])
 
 const reservedProperties = new Set(['prototype', 'then'])
@@ -108,6 +111,11 @@ export class Context {
   readonly events: EventRegistry
   readonly registry: Registry
   readonly services: ServiceRegistry
+
+  /** 绑定当前调用方 Fiber、写入当前 Root 全局日志流的结构化 Logger。 */
+  get logger(): Logger {
+    return getContextLogger(this)
+  }
 
   /** 创建一棵独立运行时树的根 Context；子 Context 统一通过 `extend()` 派生。 */
   constructor() {

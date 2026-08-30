@@ -5,6 +5,7 @@ import { Fiber } from './fiber.js'
 import type { Component } from './component.js'
 import { resolveComponent } from './component.js'
 import { clearServiceCallFrame } from './service.js'
+import { withEffectDescriptor } from './diagnostics.js'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 
 /** 同一个 Component 定义在 Registry 中共享的 Runtime 元数据。 */
@@ -72,10 +73,23 @@ export class Registry {
 
     try {
       // 父 Fiber 通过一个 Effect 拥有子 Fiber，建立唯一的级联清理路径。
-      parent.fiber.effect(() => {
-        fiber.start()
-        return () => fiber.dispose()
-      }, `ctx.installComponent(${JSON.stringify(runtime.name ?? 'anonymous')})`)
+      const label = `ctx.installComponent(${JSON.stringify(runtime.name ?? 'anonymous')})`
+      withEffectDescriptor(
+        parent.fiber,
+        {
+          type: 'component-install',
+          label,
+          childFiberId: fiber.id,
+          child: fiber,
+        },
+        () => parent.fiber.effect(
+          () => {
+            fiber.start()
+            return () => fiber.dispose()
+          },
+          label,
+        ),
+      )
     } catch (error) {
       detach()
       throw error

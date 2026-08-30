@@ -19,6 +19,7 @@ Accepted ADR 不应通过改写历史来适配新结论。需要改变决策时�
 | [0002](./0002-config-lifecycle.md) | 配置生命周期与 Fiber 串行协调 | Accepted |
 | [0003](./0003-service-isolation.md) | 服务身份由名称与隔离标签共同确定 | Accepted |
 | [0004](./0004-service-caller-context.md) | Service 调用保留调用方 Context 并按隔离地址过滤事件 | Accepted |
+| [0005](./0005-runtime-observability.md) | 运行时日志与 Effect 诊断不参与生命周期结果 | Accepted |
 
 ## 新建 ADR
 

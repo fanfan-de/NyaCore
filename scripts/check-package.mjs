@@ -13,10 +13,19 @@ import { join, resolve } from 'node:path'
 import process from 'node:process'
 
 const repositoryRoot = resolve(import.meta.dirname, '..')
-const packageRoot = join(repositoryRoot, 'packages/core')
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'nya-package-check-'))
-const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const npmCli = process.env.npm_execpath
 const childEnvironment = { ...process.env }
+const packageSpecifications = [
+  {
+    directory: 'packages/core',
+    name: '@nya/core',
+  },
+  {
+    directory: 'packages/logger-console',
+    name: '@nya/logger-console',
+  },
+]
 
 // `npm publish --dry-run` 会把 dry-run 配置传给生命周期子进程；本检查必须
 // 真正生成并安装临时 tarball，才能验证发布产物，而不是只读取模拟清单。
@@ -36,49 +45,72 @@ function assert(condition, message) {
   if (!condition) throw new Error(message)
 }
 
+function runNpm(args, cwd = repositoryRoot) {
+  assert(npmCli, 'npm_execpath is unavailable; run this check through npm')
+  return run(process.execPath, [npmCli, ...args], cwd)
+}
+
 try {
-  const packageJson = JSON.parse(
-    readFileSync(join(packageRoot, 'package.json'), 'utf8'),
-  )
-  assert(packageJson.license === 'MIT', 'package license must be MIT')
-  assert(
-    packageJson.engines?.node === '>=22.12.0',
-    'package must declare Node.js >=22.12.0',
-  )
-  assert(
-    packageJson.publishConfig?.access === 'public',
-    'scoped package must publish with public access',
-  )
+  const packageResults = []
+  for (const specification of packageSpecifications) {
+    const packageRoot = join(repositoryRoot, specification.directory)
+    const packageJson = JSON.parse(
+      readFileSync(join(packageRoot, 'package.json'), 'utf8'),
+    )
+    assert(
+      packageJson.name === specification.name,
+      `${specification.name} package name does not match its workspace`,
+    )
+    assert(
+      packageJson.license === 'MIT',
+      `${specification.name} package license must be MIT`,
+    )
+    assert(
+      packageJson.engines?.node === '>=22.12.0',
+      `${specification.name} must declare Node.js >=22.12.0`,
+    )
+    assert(
+      packageJson.publishConfig?.access === 'public',
+      `${specification.name} must publish with public access`,
+    )
 
-  const packed = JSON.parse(run(npmCommand, [
-    'pack',
-    '--workspace',
-    '@nya/core',
-    '--pack-destination',
-    temporaryRoot,
-    '--json',
-  ]))
-  assert(packed.length === 1, 'expected npm pack to produce one tarball')
+    const packed = JSON.parse(runNpm([
+      'pack',
+      '--workspace',
+      specification.name,
+      '--pack-destination',
+      temporaryRoot,
+      '--json',
+    ]))
+    assert(
+      packed.length === 1,
+      `expected npm pack to produce one ${specification.name} tarball`,
+    )
 
-  const result = packed[0]
-  const files = new Set(result.files.map(file => file.path))
-  for (const expected of [
-    'LICENSE',
-    'README.md',
-    'lib/index.d.ts',
-    'lib/index.js',
-    'package.json',
-  ]) {
-    assert(files.has(expected), `package is missing ${expected}`)
+    const result = packed[0]
+    const files = new Set(result.files.map(file => file.path))
+    for (const expected of [
+      'LICENSE',
+      'README.md',
+      'lib/index.d.ts',
+      'lib/index.js',
+      'package.json',
+    ]) {
+      assert(
+        files.has(expected),
+        `${specification.name} package is missing ${expected}`,
+      )
+    }
+    assert(
+      ![...files].some(file => file.startsWith('src/')),
+      `${specification.name} package must not contain source files`,
+    )
+    assert(
+      ![...files].some(file => file.startsWith('tests/')),
+      `${specification.name} package must not contain test files`,
+    )
+    packageResults.push(result)
   }
-  assert(
-    ![...files].some(file => file.startsWith('src/')),
-    'package must not contain source files',
-  )
-  assert(
-    ![...files].some(file => file.startsWith('tests/')),
-    'package must not contain test files',
-  )
 
   const consumerRoot = join(temporaryRoot, 'consumer')
   mkdirSync(consumerRoot)
@@ -98,28 +130,49 @@ try {
     files: ['index.ts'],
   }, null, 2))
   writeFileSync(join(consumerRoot, 'index.ts'), `
-import { Context, FiberState, type Fiber } from '@nya/core'
+import { Context, FiberState, type Fiber, type LogRecord } from '@nya/core'
+import { ConsoleLogger, type ConsoleLoggerOptions } from '@nya/logger-console'
 
 const context = new Context()
 const fiber: Fiber = context.installComponent(() => undefined)
+const options: ConsoleLoggerOptions = { timestamps: false }
+const record: LogRecord | undefined = context.logger.records()[0]
+context.installComponent(ConsoleLogger, options)
 void FiberState.ACTIVE
 void fiber
+void record
 `)
 
-  const tarball = join(temporaryRoot, result.filename)
-  run(npmCommand, [
+  const tarballs = packageResults.map(result => {
+    return join(temporaryRoot, result.filename)
+  })
+  runNpm([
     'install',
     '--ignore-scripts',
     '--no-audit',
     '--no-fund',
-    tarball,
+    ...tarballs,
   ], consumerRoot)
   run(process.execPath, [
     '--input-type=module',
     '--eval',
     `
       import { Context, FiberState } from '@nya/core'
+      import { ConsoleLogger } from '@nya/logger-console'
       const app = new Context()
+      const target = {
+        debug() {},
+        error() {},
+        info() {},
+        warn() {},
+      }
+      const logger = app.installComponent(ConsoleLogger, {
+        replay: false,
+        target,
+        timestamps: false,
+      })
+      await logger
+      app.logger.info('package check')
       if (app.fiber.state !== FiberState.ACTIVE) {
         throw new Error('root Fiber is not ACTIVE')
       }
@@ -132,9 +185,10 @@ void fiber
     join(consumerRoot, 'tsconfig.json'),
   ], consumerRoot)
 
-  console.log(
-    `npm 包检查通过：${result.filename}，共 ${result.entryCount} 个文件`,
-  )
+  const summary = packageResults.map(result => {
+    return `${result.filename}（${result.entryCount} 个文件）`
+  }).join('，')
+  console.log(`npm 包检查通过：${summary}`)
 } finally {
   rmSync(temporaryRoot, { force: true, recursive: true })
 }
