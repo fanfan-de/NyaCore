@@ -1,5 +1,4 @@
 /** 本文件定义 Component 的三种声明形式，并把它们归一化为统一的运行信息。 */
-
 import type { Context } from './context.js'
 import type { CleanupSource } from './disposable.js'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
@@ -33,25 +32,25 @@ export function resolveInject(inject?: Inject | null): ResolvedInject {
 
 /**
  * 可安装的 Component 定义。
- *
+
  * 与 Cordis 一致，Component 可以是函数、构造器，或带 `apply` 的对象。
  */
-export type Component<Config = unknown> =
+export type Component<TConfig = unknown> =
   (
-    | Component.Object<Config>
-    | Component.Function<Config>
-    | Component.Constructor<Config>
+    | Component.Object<TConfig>
+    | Component.Function<TConfig>
+    | Component.Constructor<TConfig>
   ) & {
     /** 为联合类型中的对象字面量保留 `apply` 参数的上下文类型。 */
-    apply?: Component.Function<Config>
+    apply?: Component.Function<TConfig>
   }
 
 export namespace Component {
   /** 三种 Component 形式共享的静态元数据。 */
-  export interface Base<Config = unknown> {
+  export interface Base<TConfig = unknown> {
     name?: string
     inject?: Inject
-    Config?: StandardSchemaV1<unknown, Config>
+    Config?: StandardSchemaV1<unknown, TConfig>
   }
 
   /** 直接调用的函数 Component。 */
