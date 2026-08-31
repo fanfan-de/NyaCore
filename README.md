@@ -2,7 +2,7 @@
 
 Nya 是一个面向 TypeScript 的作用域组件运行时。它通过动态服务依赖决定组件何时运行，并把定时器、监听器、服务、子组件等副作用归属到明确的生命周期中，以便在依赖、配置或组件状态变化时完整撤销和重新建立运行。
 
-> 项目仍处于早期开发阶段，当前版本为 `0.0.0`。核心实现位于 `@nya/core`，公共 API 尚未进入稳定兼容期。
+> 项目仍处于早期开发阶段，当前版本为 `0.0.0`。作用域运行时位于 `@nya/core`，内存加载层位于 `@nya/loader`，公共 API 尚未进入稳定兼容期。
 
 ## 为什么使用 Nya
 
@@ -107,6 +107,7 @@ try {
 | Service | 由组件提供、由其他组件通过 `inject` 声明依赖的具名能力 |
 | Event | 根运行时中的类型安全消息通道；监听器仍归订阅方 Fiber 所有 |
 | Registry | 索引组件定义对应的 Runtime 及其全部 Fiber 实例 |
+| Loader | 用稳定 Entry 树解析模块，并把配置控制面映射为 Fiber 子树 |
 | Logger / Diagnostics | 记录结构化生命周期事实，并检查当前与最近失败的 Effect 树 |
 
 最重要的边界是：Context 负责“在哪里运行”，Fiber 负责“运行多久以及如何撤销”。Context 隔离只影响运行时解析空间，不是权限或安全沙箱。
@@ -134,6 +135,7 @@ try {
 - 依赖缺失时组件保持 `PENDING`，服务可用性或实现变化会触发生命周期重新协调；
 - 每轮运行固定使用同一份依赖快照，避免启动和清理期间读到混合实现；
 - `context.isolate()` 为指定服务创建严格隔离的解析地址，不会回退到默认实现；
+- `context.intercept()` 为 Service 派生调用方配置，对象形式 `inject` 可以同时声明依赖和调用配置；
 - 基于 `Service` 的 class 服务会为方法调用绑定调用方 Context，普通 `provide()` 值保持原始 identity。
 
 ### Event 与配置
@@ -166,6 +168,33 @@ await consoleLogger
 await consoleLogger.dispose()
 ```
 
+### 内存 Loader
+
+- `@nya/loader` 以独立 Service 管理稳定 Entry ID、父子顺序和当前 Fiber 映射；
+- Component Entry 通过可替换 Resolver 获得定义，默认 Resolver 使用动态 `import()`；
+- Group Entry 只建立 Context / Fiber 所有权边界，并让 intercept、isolate 与 base URL 向后代组合；
+- 纯配置更新复用 Fiber，移动、安装覆盖或模块名变化只重建目标子树；
+- 解析和启动失败保存在目标 Entry 快照中，不影响无关兄弟条目，并可显式重试。
+
+```ts
+import { Loader } from '@nya/loader'
+
+const loaderFiber = app.installComponent(Loader, {
+  resolver({ name }) {
+    if (name === 'worker') return () => undefined
+    throw new Error(`unknown component: ${name}`)
+  },
+})
+await loaderFiber
+
+const worker = await app.loader.create({
+  id: 'main-worker',
+  name: 'worker',
+})
+
+console.log(worker.state) // active
+```
+
 ## API 速览
 
 | API | 用途 |
@@ -173,7 +202,8 @@ await consoleLogger.dispose()
 | `new Context()` | 创建一棵独立运行时树 |
 | `context.extend()` | 通过原型链派生 Context |
 | `context.isolate(name, label?)` | 为单个服务名派生严格隔离空间 |
-| `context.installComponent(component, config?)` | 安装组件并返回 Fiber |
+| `context.intercept(name, config)` | 为 Service 派生调用方配置 |
+| `context.installComponent(component, config?, options?)` | 安装组件，并可追加 inject / intercept / isolate |
 | `context.inject(dependencies, callback)` | 安装仅在依赖齐备时运行的轻量组件 |
 | `context.effect(setup, label?)` | 创建跟随当前 Fiber 清理的 Effect |
 | `context.provide(name, value)` / `context.get(name)` | 注册或显式读取服务 |
@@ -184,6 +214,10 @@ await consoleLogger.dispose()
 | `fiber.restart()` | 使用当前配置重建组件运行 |
 | `fiber.dispose()` | 永久销毁普通 Fiber；清空并复用根 Fiber |
 | `fiber.inspect()` | 获取当前 run 与最近失败 run 的冻结诊断快照 |
+| `context.registry.subscribe(listener, options?)` | 订阅只读 Component 生命周期快照 |
+| `loader.create()` / `update()` / `move()` | 创建或变更稳定 Entry，并协调对应 Fiber 子树 |
+| `loader.remove()` / `resolve()` | 删除 Entry 子树或显式重试失败条目 |
+| `loader.get()` / `entries()` / `awaitIdle()` | 读取冻结快照或等待 Loader 协调稳定 |
 
 完整公共导出以 [`packages/core/src/index.ts`](./packages/core/src/index.ts) 为准；当前行为的详细说明见[核心概念指南](./docs/concepts.md)。
 
@@ -192,6 +226,7 @@ await consoleLogger.dispose()
 ```text
 NyaCore/
 ├── packages/core/       # @nya/core 源码、构建配置与测试
+├── packages/loader/     # @nya/loader 内存 Entry 树与模块解析
 ├── packages/logger-console/ # 可选的 @nya/logger-console 输出组件
 ├── playground/          # 可运行示例与手动验证场景
 ├── docs/                # 架构、概念、设计和 ADR
@@ -208,12 +243,12 @@ npm run check
 
 | 命令 | 说明 |
 | --- | --- |
-| `npm run build` | 构建 `@nya/core` 和 `@nya/logger-console` |
-| `npm test` | 运行两个发布包的 Vitest 测试 |
-| `npm run typecheck` | 检查两个发布包、测试和 Playground 的类型 |
+| `npm run build` | 构建 `@nya/core`、`@nya/loader` 和 `@nya/logger-console` |
+| `npm test` | 运行三个发布包的 Vitest 测试 |
+| `npm run typecheck` | 检查三个发布包、测试和 Playground 的类型 |
 | `npm run docs:check` | 检查 Markdown 结构、代码围栏和本地链接 |
 | `npm run check` | 依次运行文档、类型和测试检查 |
-| `npm run package:check` | 构建、打包并以外部消费者方式验证两个发布包 |
+| `npm run package:check` | 构建、打包并以外部消费者方式验证三个发布包 |
 | `npm run release:check` | 运行完整仓库检查和 npm 包发布前验证 |
 | `npm run playground` | 构建 Core 并运行全部示例场景 |
 | `npm run dev:core` | 监听 Core 源码并持续构建 |
@@ -234,7 +269,7 @@ npm run check
 
 ## 当前边界
 
-Context 拦截、callable Service、mixin、Loader 和 HMR 仍属于目标设计，尚不能作为已实现能力使用。异步 Standard Schema 校验也不在当前版本支持范围内。运行时诊断不会自动发现绕过 Core 所有权协议创建的宿主资源，也不会以超时自动中断 cleanup。
+callable Service、mixin、文件配置持久化和 HMR 仍属于目标设计，尚不能作为已实现能力使用。当前 Loader 只保存内存 Entry 树，不读取 YAML / JSON，也不监听文件。异步 Standard Schema 校验同样不在当前版本支持范围内。运行时诊断不会自动发现绕过 Core 所有权协议创建的宿主资源，也不会以超时自动中断 cleanup。
 
 ## 许可证
 

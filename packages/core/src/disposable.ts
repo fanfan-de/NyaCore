@@ -61,9 +61,26 @@ export class DisposableStack {
       throw new Error('cannot add a disposer to a disposed stack')
     }
 
-    const wrapped = once(dispose)
-    this.#disposers.push(wrapped)
-    return wrapped
+    const cleanup = once(dispose)
+    let task: Promise<void> | undefined
+    const registered: Disposer = () => {
+      if (task) return task
+
+      try {
+        task = Promise.resolve(cleanup()).then(() => {
+          // 主动清理成功后立即解除栈对资源闭包的强引用；失败项继续保留，
+          // 让所属 Fiber 最终清理时仍能观察同一个拒绝结果。
+          const index = this.#disposers.indexOf(registered)
+          if (index >= 0) this.#disposers.splice(index, 1)
+        })
+      } catch (error) {
+        task = Promise.reject(error)
+      }
+      void task.catch(() => {})
+      return task
+    }
+    this.#disposers.push(registered)
+    return registered
   }
 
   /** 启动整栈清理；重复调用时始终返回第一次创建的清理任务。 */

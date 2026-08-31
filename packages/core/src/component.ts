@@ -1,15 +1,29 @@
 /** 本文件定义 Component 的三种声明形式，并把它们归一化为统一的运行信息。 */
 import type { Context } from './context.js'
 import type { CleanupSource } from './disposable.js'
+import type { IsolationLabel } from './symbols.js'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 
-/** 组件需要的服务；对象形式当前同样只读取键。 */
+/** 组件需要的服务；对象值同时声明该 Service 的调用配置。 */
 export type Inject =
   | readonly string[]
   | Readonly<Record<string, unknown>>
 
 /** Fiber 内部使用的、不会受用户后续修改影响的依赖名称集合。 */
 export type ResolvedInject = ReadonlySet<string>
+
+/** Component 对象 Inject 中显式提供的 Service 调用配置。 */
+export type ResolvedIntercept = ReadonlyMap<string, unknown>
+
+/** 只影响一次 Component 安装的 Context 覆盖。 */
+export interface ComponentInstallOptions {
+  /** 追加依赖；不能移除 Component 静态声明。 */
+  readonly inject?: Inject
+  /** 在 Component 自身 Context 上追加的 Service 调用配置。 */
+  readonly intercept?: Readonly<Record<string, unknown>>
+  /** 在 Component 自身 Context 上追加的严格 Service 隔离地址。 */
+  readonly isolate?: Readonly<Record<string, IsolationLabel>>
+}
 
 /** 把公开声明复制为独立 Set，同时校验并消除重复名称。 */
 export function resolveInject(inject?: Inject | null): ResolvedInject {
@@ -27,6 +41,22 @@ export function resolveInject(inject?: Inject | null): ResolvedInject {
     result.add(name)
   }
 
+  return result
+}
+
+/** 复制对象形式 Inject 中的非 undefined 配置值。 */
+export function resolveInjectIntercept(
+  inject?: Inject | null,
+  resolved = resolveInject(inject),
+): ResolvedIntercept {
+  const result = new Map<string, unknown>()
+  if (!inject || Array.isArray(inject)) return result
+  const record = inject as Readonly<Record<string, unknown>>
+
+  for (const name of resolved) {
+    const value = record[name]
+    if (value !== undefined) result.set(name, value)
+  }
   return result
 }
 
@@ -86,6 +116,7 @@ export interface ResolvedComponent {
   kind: Component.Kind
   callback: Component.Callback<any>
   inject: ResolvedInject
+  intercept: ResolvedIntercept
   Config?: StandardSchemaV1<unknown, any>
 }
 
@@ -135,12 +166,15 @@ export function resolveComponent(
   const name = typeof componentName === 'string' && componentName !== 'apply'
     ? componentName
     : undefined
+  const declaredInject = component.inject
+  const inject = resolveInject(declaredInject)
 
   return {
     callback,
     kind: isConstructor(callback) ? 'constructor' : 'function',
     name,
-    inject: resolveInject(component.inject),
+    inject,
+    intercept: resolveInjectIntercept(declaredInject, inject),
     Config: component.Config,
   }
 }

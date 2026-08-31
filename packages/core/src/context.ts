@@ -12,7 +12,11 @@ import type {
   EventThisArgument,
 } from './events.js'
 import { Fiber } from './fiber.js'
-import type { Component, Inject } from './component.js'
+import type {
+  Component,
+  ComponentInstallOptions,
+  Inject,
+} from './component.js'
 import { Registry } from './registry.js'
 import {
   inheritServiceCallFrame,
@@ -23,12 +27,15 @@ import { getContextLogger } from './logger.js'
 import type { Logger } from './logger.js'
 import {
   contextFilter,
+  contextIntercepts,
   contextIsolations,
   contextMarker,
+  serviceConfig,
 } from './symbols.js'
 
 const protectedProperties = new Set<PropertyKey>([
   contextMarker,
+  contextIntercepts,
   contextIsolations,
   'fiber',
   'events',
@@ -106,6 +113,7 @@ export class Context {
   readonly [contextIsolations]!: Readonly<
     Record<string, IsolationLabel | undefined>
   >
+  readonly [contextIntercepts]!: Readonly<Record<string, unknown>>
   readonly root: this
   readonly fiber: Fiber
   readonly events: EventRegistry
@@ -130,6 +138,12 @@ export class Context {
       value: Object.freeze(
         Object.create(null) as Record<string, IsolationLabel>,
       ),
+      writable: false,
+    })
+    Object.defineProperty(this, contextIntercepts, {
+      configurable: false,
+      enumerable: false,
+      value: Object.freeze(Object.create(null) as Record<string, unknown>),
       writable: false,
     })
 
@@ -206,11 +220,46 @@ export class Context {
     return context
   }
 
+  /** 为一个 Service 派生调用配置；配置按调用方 Context 解析。 */
+  intercept<Key extends string & keyof this>(
+    name: Key,
+    config: this[Key] extends { readonly [serviceConfig]: infer Config }
+      ? Config
+      : unknown,
+  ): this
+  intercept(name: string, config: unknown): this
+  intercept(name: string, config: unknown): this {
+    if (typeof name !== 'string' || name.length === 0) {
+      throw new TypeError('invalid service name: expected a non-empty string')
+    }
+
+    const context = this.extend()
+    const intercepts = Object.create(this[contextIntercepts]) as Record<
+      string,
+      unknown
+    >
+    Object.defineProperty(intercepts, name, {
+      configurable: false,
+      enumerable: true,
+      value: config,
+      writable: false,
+    })
+    Object.freeze(intercepts)
+    Object.defineProperty(context, contextIntercepts, {
+      configurable: false,
+      enumerable: false,
+      value: intercepts,
+      writable: false,
+    })
+    return context
+  }
+
   installComponent<Definition extends Component<any>>(
     component: Definition,
     config?: Component.Config<Definition>,
+    options?: ComponentInstallOptions,
   ) {
-    return this.registry.install(this, component, config)
+    return this.registry.install(this, component, config, options)
   }
 
   /** 把一个回调安装成只在指定服务齐备时运行的轻量组件。 */

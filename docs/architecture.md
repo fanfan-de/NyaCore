@@ -2,15 +2,15 @@
 
 > 状态：Current<br>
 > 类型：Explanation<br>
-> 适用范围：仓库当前已实现的 `@nya/core` 运行时
+> 适用范围：仓库当前已实现的 `@nya/core` 运行时与基础外围包
 
 本文用一组互补视图说明 Nya Core 当前的系统边界、核心构件、运行时关系和必须维持的不变量。它不承担完整 API Reference，也不把[目标设计](./design.md)中尚未实现的能力描述成当前架构。
 
-判断当前行为时，以 `packages/core/src/` 的源码与导出类型、`packages/core/tests/` 的行为测试以及[核心概念指南](./concepts.md)为证据。图中的箭头表达运行时职责或关系，不等同于 TypeScript 文件之间的 import 方向。
+判断当前行为时，以 `packages/core/`、`packages/loader/` 与 `packages/logger-console/` 的源码、导出类型和行为测试以及[核心概念指南](./concepts.md)为证据。图中的箭头表达运行时职责或关系，不等同于 TypeScript 文件之间的 import 方向。
 
 ## 1. 三十秒理解
 
-Nya Core 是一个嵌入宿主 JavaScript / TypeScript 进程的**作用域组件运行时**：Registry 将可复用的组件定义安装为独立的 Context 与 Fiber；Context 表达组件从哪个服务隔离视图观察和操作运行时，Fiber 管理该组件实例的状态、依赖快照、已校验配置和 Effect；ServiceRegistry 与配置版本共同驱动 Fiber 串行停止和重新启动，Service 调用视图保留消费者 Context，所有资源通过 Effect 所有权关系完成失败回滚和级联清理。Root 内的 LoggerHub 和 `fiber.inspect()` 旁路呈现这些状态，但不参与生命周期结果。
+Nya Core 是一个嵌入宿主 JavaScript / TypeScript 进程的**作用域组件运行时**：Registry 将可复用的组件定义安装为独立的 Context 与 Fiber，并按原始定义引用维护 Runtime；Context 表达组件从哪个服务隔离与 intercept 视图观察和操作运行时，Fiber 管理该组件实例的状态、依赖快照、已校验配置和 Effect；ServiceRegistry 与配置版本共同驱动 Fiber 串行停止和重新启动，Service 调用视图保留消费者 Context，所有资源通过 Effect 所有权关系完成失败回滚和级联清理。Root 内的 LoggerHub、`fiber.inspect()` 和 Registry 生命周期快照旁路呈现这些状态，但不参与生命周期结果。
 
 可以把核心模型压缩为：
 
@@ -36,10 +36,13 @@ flowchart LR
     subgraph Process["同一 JavaScript / TypeScript 进程"]
         Host["宿主应用"]
         Core["@nya/core<br/>作用域运行时"]
+        Loader["@nya/loader<br/>内存 Entry 树与模块解析"]
         ConsoleLogger["@nya/logger-console<br/>可选控制台 sink"]
         Components["应用组件<br/>函数、class 或带 apply 的对象"]
 
         Host -->|"创建 Root Context<br/>安装或卸载组件"| Core
+        Host -->|"创建、更新、移动 Entry"| Loader
+        Loader -->|"只使用公开安装、Fiber<br/>与 Registry 观察协议"| Core
         Core -->|"派生 Context<br/>驱动启动、停止与重启"| Components
         Components -->|"声明 Inject、提供 Service<br/>登记 Effect 与 Event"| Core
         ConsoleLogger -->|"显式安装并订阅结构化日志"| Core
@@ -54,12 +57,12 @@ flowchart LR
 
 当前边界有三点需要明确：
 
-- Core 接收宿主已经提供的组件定义，不负责发现、导入或热替换模块；
+- Core 接收宿主已经提供的组件定义，不负责发现、导入或热替换模块；`@nya/loader` 可以通过可替换 Resolver 导入模块，但不负责 HMR；
 - Core 管理资源的生命周期协议，但不实现数据库、网络或业务服务本身；
 - Core 只观察通过其公开所有权协议登记的资源，不枚举宿主进程中的任意句柄，也不为 cleanup 设置统一超时；
 - Context 是进程内作用域协议，不是权限、安全或进程沙箱。
 
-Loader、配置文件、HMR、控制台输出和分布式生命周期不属于 `@nya/core`；其中控制台输出已经由独立的 `@nya/logger-console` Component 提供。
+Loader、配置文件、HMR、控制台输出和分布式生命周期不属于 `@nya/core`。内存 Entry 加载已经由独立的 `@nya/loader` Service 提供，控制台输出由 `@nya/logger-console` Component 提供；文件持久化、HMR 和分布式生命周期仍未实现。
 
 ## 3. 核心构件
 
@@ -117,7 +120,7 @@ flowchart TB
 | --- | --- | --- |
 | Context | 创建、派生和隔离作用域；把安装、Effect、Service 和 Event 操作委托给对应构件 | [`context.ts`](../packages/core/src/context.ts) |
 | Component 解析 | 接受函数、构造器或带 `apply` 的对象；归一化入口、名称和 Inject | [`component.ts`](../packages/core/src/component.ts) |
-| Registry / Component Runtime | 把定义安装为 Context + Fiber；按入口引用索引同一定义产生的 Fiber | [`registry.ts`](../packages/core/src/registry.ts) |
+| Registry / Component Runtime | 把定义安装为 Context + Fiber；按原始定义引用索引 Fiber，并发布只读生命周期快照 | [`registry.ts`](../packages/core/src/registry.ts) |
 | Fiber | 串行协调单次安装的启动、临时卸载、重启和永久销毁；固定本轮依赖快照 | [`fiber.ts`](../packages/core/src/fiber.ts) |
 | DisposableStack / EffectScope | 收集 CleanupSource；提供幂等、后进先出、失败回滚和聚合错误清理 | [`disposable.ts`](../packages/core/src/disposable.ts) |
 | ServiceRegistry / Service | 注册具名服务、捕获依赖快照、维护反向订阅、绑定 Service 调用方 Context 并通知消费者 | [`service.ts`](../packages/core/src/service.ts) |
@@ -220,10 +223,10 @@ sequenceDiagram
     participant Services as ServiceRegistry
 
     Caller->>Context: installComponent(definition, config)
-    Context->>Registry: install(parent, definition, config)
+    Context->>Registry: install(parent, definition, config, options?)
     Registry->>Registry: 解析定义并查找或创建 Runtime
     Registry->>Parent: assertActive()
-    Registry->>Context: extend()
+    Registry->>Context: extend() + isolate/intercept 覆盖
     Context-->>Registry: 派生 Context
     Registry->>Fiber: 创建并登记 Context、父 Fiber、Inject 与配置
     Registry->>Parent: 登记安装 Effect
@@ -391,6 +394,11 @@ flowchart LR
 13. Service 事件过滤必须同时匹配 Root 与该 Service 名称的隔离标签，`global` Hook 除外。
 14. Logger 写入和 sink 失败不能影响生命周期状态、清理顺序、Promise 结果或原错误身份。
 15. 诊断数据只旁路观察已登记资源，并以当前 run、最近失败 run 和 1000 条日志为有界保留范围。
+16. Component Runtime 按原始定义引用区分，共享 `apply` 的不同对象不能合并。
+17. Service intercept 按调用方 Context 解析，不得写回 Provider 全局实例。
+18. Registry 生命周期观察只交付冻结快照，观察者失败不得改变生命周期结果。
+19. 主动销毁子 Fiber 必须同时解除父级安装 Effect，不能在所有权栈或诊断树中保留成功清理的安装。
+20. Loader 用稳定 Entry ID 表达控制面身份，只能通过 Core 公开协议映射当前 Fiber。
 
 这些行为分别由[生命周期测试](../packages/core/tests/lifecycle.spec.ts)、[服务依赖测试](../packages/core/tests/service.spec.ts)、[服务隔离测试](../packages/core/tests/isolation.spec.ts)和[事件测试](../packages/core/tests/events.spec.ts)覆盖。完整概念解释见[核心概念指南](./concepts.md)。
 
@@ -400,13 +408,13 @@ flowchart LR
 
 | 领域 | 当前架构 | 仍属目标设计 |
 | --- | --- | --- |
-| Component | 函数、class、对象定义；每次安装独立 Context 与 Fiber | Loader、模块发现与 HMR |
-| Config | 同步 Standard Schema 校验与转换；`fiber.config`、`update()`、`restart()` 与快速更新收敛 | Loader 读写、配置文件持久化与 HMR |
-| Service | `(服务名, 隔离标签)` 严格寻址；Inject 快照按地址驱动消费者启停；最小 `Service` 基类、调用方 Context Proxy、`init` 与 `check` | Context 拦截、callable Service、`extend` 与 mixin |
+| Component | 函数、class、对象定义；每次安装独立 Context 与 Fiber；Loader Resolver 与稳定 Entry 树 | HMR 与模块缓存失效 |
+| Config | 同步 Standard Schema 校验与转换；`fiber.config`、`update()`、`restart()`；Loader 内存原始配置更新 | 配置文件持久化与 HMR |
+| Service | `(服务名, 隔离标签)` 严格寻址；Inject 快照按地址驱动消费者启停；调用方 Context Proxy、intercept 配置、`init`、`check` 与配置合并协议 | callable Service、`extend` 与 mixin |
 | Effect | CleanupSource、失败回滚、幂等 LIFO 清理、聚合错误和结构化诊断树 | 更丰富的宿主资源探针 |
 | Event | 生命周期绑定、Context 过滤和五种派发模式；Service `thisArg` 按调用方隔离地址过滤 | 更完整的业务级事件调试工具 |
-| Observability | Root 内 Logger、1000 条缓冲、生命周期事件、当前与最近失败快照 | 外部持久化、查询与告警后端 |
-| 包边界 | `@nya/core`、`@nya/logger-console` 和 playground；console 包只使用 Core 公开 API | `@nya/loader`、`@nya/hmr` 等其他外围包 |
+| Observability | Root 内 Logger、1000 条缓冲、Registry 生命周期快照、当前与最近失败诊断 | 外部持久化、查询与告警后端 |
+| 包边界 | `@nya/core`、`@nya/loader`、`@nya/logger-console` 和 playground；外围包只使用 Core 公开 API | 文件配置、`@nya/hmr` 等其他外围包 |
 
 目标语义、非目标和建议的后续包见[核心设计](./design.md)。其中标记为 Proposed 的内容应在图中使用虚线或 `«proposed»`，并与本文的 Current 视图分开维护。
 
@@ -414,8 +422,8 @@ flowchart LR
 
 | 要确认的事实 | 首选证据 |
 | --- | --- |
-| 当前公共 API | [`packages/core/src/index.ts`](../packages/core/src/index.ts) 与导出类型 |
-| 当前可观察行为 | `packages/core/src/`、`packages/core/tests/`、[核心概念指南](./concepts.md) |
+| 当前公共 API | [`@nya/core` 入口](../packages/core/src/index.ts)、[`@nya/loader` 入口](../packages/loader/src/index.ts)与导出类型 |
+| 当前可观察行为 | `packages/core/tests/`、`packages/loader/tests/`、[核心概念指南](./concepts.md) |
 | 当前架构关系 | 上述实现证据与本文 |
 | 目标架构和未来约束 | 状态明确的[核心设计](./design.md) |
 | 为什么接受某项跨模块决策 | [ADR 索引](./adr/README.md)中的对应记录 |

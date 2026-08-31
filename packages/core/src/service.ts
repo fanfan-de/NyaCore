@@ -10,6 +10,7 @@ import type { EffectDescriptor } from './diagnostics.js'
 import type { IsolationLabel } from './symbols.js'
 import {
   contextFilter,
+  contextIntercepts,
   contextIsolations,
   fiberBeforeUnload,
   fiberGetServiceImplementation,
@@ -17,7 +18,10 @@ import {
   serviceCapture,
   serviceCheck,
   serviceContextFilter,
+  serviceConfig,
   serviceInit,
+  serviceMergeConfig,
+  serviceResolveConfig,
   serviceSubscribe,
 } from './symbols.js'
 
@@ -855,12 +859,18 @@ export class ServiceRegistry {
 
 /**
  * 把 class 实例注册成服务，并让消费者通过绑定调用方 Context 的 facade 使用它。
- * callable、extend、intercept 和 mixin 仍属于后续协议。
+ * callable、extend 和 mixin 仍属于后续协议。
  */
-export abstract class Service {
+export abstract class Service<Config = unknown> {
   static readonly init: typeof serviceInit = serviceInit
   static readonly check: typeof serviceCheck = serviceCheck
+  static readonly config: typeof serviceConfig = serviceConfig
+  static readonly resolveConfig: typeof serviceResolveConfig =
+    serviceResolveConfig
+  static readonly mergeConfig: typeof serviceMergeConfig = serviceMergeConfig
   static provide?: string
+
+  declare readonly [serviceConfig]: Config
 
   readonly name: string
 
@@ -891,4 +901,34 @@ export abstract class Service {
   }
 
   protected [serviceCheck]?(): boolean
+
+  /** 按当前 facade 的调用方 Context 解析 Service 调用配置。 */
+  protected [serviceResolveConfig](base?: Config, head?: Config): Config {
+    const configs: Config[] = []
+    if (arguments.length >= 1) configs.push(base as Config)
+
+    let intercepts: object | null = this.ctx[contextIntercepts]
+    const inherited: Config[] = []
+    while (intercepts) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(
+        intercepts,
+        this.name,
+      )
+      if (descriptor && 'value' in descriptor) {
+        inherited.unshift(descriptor.value as Config)
+      }
+      intercepts = Reflect.getPrototypeOf(intercepts)
+    }
+    configs.push(...inherited)
+
+    if (arguments.length >= 2) configs.push(head as Config)
+    const merge = this[serviceMergeConfig]
+    if (typeof merge === 'function') {
+      return Reflect.apply(merge, this, configs) as Config
+    }
+    return configs.at(-1) as Config
+  }
+
+  /** Service 可以覆盖本协议，显式决定多层配置如何合并。 */
+  protected [serviceMergeConfig]?(...configs: Config[]): Config
 }

@@ -47,11 +47,20 @@ export type {
 } from './logger.js'
 export type {
   Component,
+  ComponentInstallOptions,
   Inject,
   ResolvedInject,
+  ResolvedIntercept,
 } from './component.js'
 export { Registry } from './registry.js'
-export type { ComponentRuntime } from './registry.js'
+export type {
+  ComponentRuntime,
+  ComponentRuntimeLifecycleSnapshot,
+  FiberLifecycleSnapshot,
+  RegistryEvent,
+  RegistryListener,
+  RegistrySubscribeOptions,
+} from './registry.js'
 export { Service, ServiceRegistry } from './service.js'
 export type {
   DependencySnapshot,
@@ -62,5 +71,8 @@ export {
   contextFilter,
   contextMarker,
   serviceCheck,
+  serviceConfig,
   serviceInit,
+  serviceMergeConfig,
+  serviceResolveConfig,
 } from './symbols.js'

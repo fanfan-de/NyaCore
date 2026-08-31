@@ -1,13 +1,13 @@
-# Nya Core 核心概念指南
+# Nya 核心概念指南
 
 > 状态：Current<br>
 > 类型：Explanation<br>
-> 适用范围：仓库当前已实现的 Core 运行时<br>
-> 对应包：`@nya/core`
+> 适用范围：仓库当前已实现的 Core 运行时与基础外围包<br>
+> 对应包：`@nya/core`、`@nya/loader`、`@nya/logger-console`
 
 本文解释 Nya Core 当前代码中的核心概念、概念之间的关系，以及这些概念在生命周期中的实际行为。它面向第一次阅读代码的开发者，也可以作为编写组件时的心智模型。
 
-本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Service、Inject、严格服务隔离、Service 调用方 Context 追踪、隔离事件过滤、动态依赖、Event、同步配置生命周期、Logger 和 Effect 诊断已经可用；Context 拦截、callable Service、Loader 和 HMR 等能力仍属于后续设计目标，详见[核心设计](./design.md)。
+本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Core 的 Service、Inject、严格服务隔离、调用方 Context 追踪、Context intercept、单次安装覆盖、Registry 生命周期观察、Event、同步配置生命周期、Logger 和 Effect 诊断已经可用；外围包已经提供内存 Loader 与控制台 Logger。callable Service、mixin、文件配置持久化和 HMR 等能力仍属于后续设计目标，详见[核心设计](./design.md)。
 
 ## 1. 一句话理解 Nya Core
 
@@ -53,7 +53,7 @@ Nya Core 是一个**由动态服务依赖驱动，并能追踪组件副作用、
 | Logger | 当前 Root 内的结构化日志视图 | 与 Root 运行时相同 | `ctx.logger`、`LogRecord` |
 | Diagnostic Snapshot | 当前 run 与最近失败 run 的只读资源视图 | 每次检查时新建 | `fiber.inspect()` |
 | Registry | 组件 Runtime 与 Fiber 的根级索引 | 与根 Context 相同 | `Registry` |
-| Component Runtime | 同一个组件入口共享的运行元数据 | 存在实例时有效 | `ComponentRuntime` |
+| Component Runtime | 同一个 Component 定义引用共享的运行元数据 | 存在实例时有效 | `ComponentRuntime` |
 | Root Context | 一棵运行时树的入口 | 可反复安装和清空组件 | `new Context()` |
 
 下面分别解释这些概念。
@@ -145,9 +145,9 @@ first.context !== second.context
 
 ### 3.5 当前的 Runtime 身份
 
-Registry 当前以归一化后的入口引用作为 Component Runtime 的键：函数和 class 使用自身，对象使用 `apply`。因此，两个对象如果复用同一个 `apply` 函数，会被视为共享 Runtime 元数据。Runtime 的名称和配置 Schema 都取第一次建立该 Runtime 时读取到的值。
+Registry 以传入的原始 Component 定义引用作为 Runtime 键。函数和 class 的定义引用就是自身；对象使用对象本身，而不是它的 `apply` 回调。因此，两个对象即使复用同一个 `apply`，也拥有不同 Runtime、名称和配置 Schema。
 
-这是当前实现的身份规则，不等于“任意同名组件都是同一个组件”。如果组件需要独立 Runtime，应使用不同的 `apply` 函数引用。
+同一个定义引用安装多次时共享定义级 Runtime 元数据，但每次安装仍获得不同的 `Fiber.id`、Context、配置和 Effect。Fiber 因配置或依赖变化重新启动时，又会产生新的运行轮次；定义身份、安装身份和运行轮次不能互相替代。该规则记录在 [ADR-0007](./adr/0007-component-installation-identity.md) 中。
 
 ## 4. Component Instance：一次安装的运行结果
 
@@ -263,7 +263,39 @@ const scoped = app
 
 上述身份、严格匹配和生命周期边界记录在 [ADR-0003](./adr/0003-service-isolation.md) 中。
 
-### 5.5 Context 识别
+### 5.5 Service 调用配置 Context
+
+`context.intercept(name, config)` 为一个服务名派生调用配置，原 Context 保持不变：
+
+```ts
+const fast = app.intercept('database', { timeout: 500 })
+const slow = app.intercept('database', { timeout: 10_000 })
+```
+
+intercept 沿 Context 原型链继承，但配置由 Service 的调用方 facade 解析，不写回 Provider 全局实例。因此，`fast` 和 `slow` 可以同时调用同一个 Service 实现而不互相覆盖。默认 `Service.resolveConfig` 使用最靠近调用方的一层；需要字段级合并时，Service 应实现 `Service.mergeConfig`：
+
+```ts
+interface DatabaseCallConfig {
+  timeout?: number
+  retries?: number
+}
+
+class DatabaseService extends Service<DatabaseCallConfig> {
+  currentConfig() {
+    return this[Service.resolveConfig]()
+  }
+
+  protected [Service.mergeConfig](...configs: DatabaseCallConfig[]) {
+    return Object.assign({}, ...configs)
+  }
+}
+```
+
+Service 可以用 `Service.config` 这个类型协议向 `Context.intercept()` 暴露配置类型。`Service.resolveConfig(base?, head?)` 的完整顺序是 base、从父到子的 Context 层、head；没有自定义 merge 时最后一层替换前面的值。
+
+intercept 与 `isolate()` 相互独立：isolate 决定解析哪个 Service 地址，intercept 决定通过该调用 Context 使用什么配置。它们都只是不可变 Context 派生，不创建新的生命周期所有者。详细语义记录在 [ADR-0006](./adr/0006-context-interception.md) 中。
+
+### 5.6 Context 识别
 
 `Context.is(value)` 不只依赖 `instanceof`，而是检查：
 
@@ -275,7 +307,7 @@ Symbol.for('@nya/core/context')
 
 该标记只是运行时互操作协议，不是安全机制。具有任意 JavaScript 执行能力的代码可以伪造属性；Context 也不构成进程或权限沙箱。
 
-### 5.6 Service 与 Inject
+### 5.7 Service 与 Inject
 
 `ctx.provide(name, value)` 把一个具名能力注册为当前 Fiber 本轮运行拥有的 Effect。消费者可以在 Component 上声明必需依赖：
 
@@ -302,15 +334,15 @@ ctx.inject(['database'], (ctx) => {
 
 普通组件只能通过 `ctx.database` 或 `ctx.get('database')` 读取已经声明在 `inject` 中的服务；未声明访问会抛错。根 Context 可以读取当前有效服务，提供方也可以在自己的初始化过程中读取自己刚注册的服务。
 
-运行时会把数组或对象形式的 `inject` 复制为每次安装独有的只读名称集合；对象形式当前只读取键，配置值尚无运行时含义。`provide()`、显式 `get()`、属性读取、依赖捕获和变化通知都按照调用 Context 的 `(服务名, 隔离标签)` 定位同一个 slot；同一地址只能注册一个实现，不同标签则可以同时提供同名服务。
+运行时会把数组或对象形式的 `inject` 复制为每次安装独有的只读名称集合。对象键声明依赖，非 `undefined` 值还会成为该组件 Context 上对应 Service 的 intercept 层；值为 `undefined` 时只声明依赖，`null` 是合法显式配置。`provide()`、显式 `get()`、属性读取、依赖捕获和变化通知都按照调用 Context 的 `(服务名, 隔离标签)` 定位同一个 slot；同一地址只能注册一个实现，不同标签则可以同时提供同名服务。
 
 `'database' in context` 也只观察当前隔离地址是否已被运行时认识，例如发生过服务注册或依赖声明；其他标签存在同名服务不会使这个判断变成 `true`。它不等同于“当前存在 ACTIVE 实现”，实际值仍应通过属性读取或 `get()` 获取。
 
 Context 自身已经定义的成员名（例如 `isolate`、`get` 或 `effect`）由真实 API 优先占用，不进入服务属性代理。服务仍可使用这些非空名称注册和注入，但消费者必须通过 `context.get(name)` 读取；此时 `name in context` 观察到的是 Context 成员，而不是服务 slot。
 
-Core 已提供最小 `Service` 基类。子类可以通过 `static provide` 或构造器参数声明服务名，实例会自动注册到当前 Context；`Service.init` 的异步初始化会阻止服务在完成前变为可用，`Service.check` 可以让实例暂时不满足消费者依赖。`Service.config`、`Service.invoke`、`Service.extend`、callable Service 和 mixin 仍属于后续高级协议。
+Core 已提供 `Service` 基类。子类可以通过 `static provide` 或构造器参数声明服务名，实例会自动注册到当前 Context；`Service.init` 的异步初始化会阻止服务在完成前变为可用，`Service.check` 可以让实例暂时不满足消费者依赖。`Service.config`、`Service.resolveConfig` 和可选 `Service.mergeConfig` 已用于调用方 intercept 配置；`Service.invoke`、`Service.extend`、callable Service 和 mixin 仍属于后续高级协议。
 
-### 5.7 Service 调用方 Context
+### 5.8 Service 调用方 Context
 
 消费者从 Context 属性或 `get()` 取得 `Service` 实例时，运行时返回绑定到本次调用 Context 的 Proxy 视图。普通 prototype 方法中的 `this.ctx` 因而是从调用方派生的混合 Context，而 Service 的依赖读取固定到创建该实现的 Provider run 与依赖快照：Service 不能借用消费者的 `inject` 绕过自己的依赖声明，旧 facade 也不会在 Provider 重启后切换到新快照；该实现失效并完成消费者清理后，旧 facade 按 inactive-context 语义拒绝继续调用。
 
@@ -354,9 +386,9 @@ app.database === database
 
 在混合 Context 上继续调用 `extend()` 或 `isolate()` 时，派生结果会成为后续下游 Service 的新调用方视图，同时保留当前 Service 的提供方依赖来源。通过混合 Context 安装的新组件会清除这项调用帧，改用组件自己的 `inject` 和快照。Root 提供方没有组件快照，其依赖读取在当前 Root run 内保持实时且不受 `inject` 限制；Root 重置后旧 facade 同样失效。
 
-上述调用身份、资源归属和代理限制记录在 [ADR-0004](./adr/0004-service-caller-context.md) 中；[Playground 场景](../playground/src/scenarios/service-caller-context.ts)演示了异步调用、Effect 所有权与隔离事件过滤。Context 拦截配置、callable Service、`Service.extend` 和 mixin 尚未实现。
+上述调用身份、资源归属和代理限制记录在 [ADR-0004](./adr/0004-service-caller-context.md) 中；[Playground 场景](../playground/src/scenarios/service-caller-context.ts)演示了异步调用、Effect 所有权与隔离事件过滤。Context intercept 已在同一调用方绑定上实现；callable Service、`Service.extend` 和 mixin 尚未实现。
 
-### 5.8 Context Logger
+### 5.9 Context Logger
 
 每个 Context 都提供只读 `logger`。它绑定当前 Fiber，因此普通用户日志会自动带上 Fiber ID、组件名称、状态和 run ID；在 Service 方法中访问 `this.ctx.logger` 时，归属调用方 Context，而不是 Service 提供方。
 
@@ -687,7 +719,8 @@ DisposableStack 是一组 Disposer 的幂等、后进先出容器：
 - `add(disposer)` 登记并返回包装后的幂等 Disposer；
 - `dispose()` 清空整个栈；
 - 栈开始清理后不能再加入新 Disposer；
-- 重复 `dispose()` 会复用第一次清理任务。
+- 重复 `dispose()` 会复用第一次清理任务；
+- 主动调用单项 Disposer 并成功后，该项会从栈中解除强引用；清理失败的项继续保留，使所属栈最终清理仍能观察同一个拒绝结果。
 
 它只管理“怎么清理”，不负责组件状态。
 
@@ -723,11 +756,13 @@ Component Runtime 是组件定义和组件实例之间的一层共享元数据�
 
 ```ts
 interface ComponentRuntime {
-  name?: string
-  kind: 'function' | 'constructor'
-  callback: Component.Callback
-  Config?: StandardSchemaV1
-  fibers: Set<Fiber>
+  readonly id: number
+  readonly definition: Component
+  readonly name?: string
+  readonly kind: 'function' | 'constructor'
+  readonly callback: Component.Callback
+  readonly Config?: StandardSchemaV1
+  readonly fibers: readonly Fiber[]
 }
 ```
 
@@ -740,22 +775,23 @@ Component Runtime
 └── Fiber #3 + Context #3 + Config #3
 ```
 
-最后一个 Fiber 卸载并从集合移除后，当前实现会自动删除空闲 Runtime。
+`Registry.get()` 每次返回冻结快照，其中 `fibers` 是冻结数组，不能反向增删内部实例集合。最后一个 Fiber 卸载并从集合移除后，当前实现会自动删除空闲 Runtime。
 
 ### 10.3 安装流程
 
-`parentContext.installComponent(definition, config)` 当前会依次完成：
+`parentContext.installComponent(definition, config, options?)` 当前会依次完成：
 
 1. 校验并归一化函数、class 或带 `apply` 的对象定义；
 2. 确认父 Fiber 仍可创建 Effect；
-3. 查找或创建 Component Runtime，并固定该 Runtime 首次读取到的 Schema；
-4. 从父 Context 派生组件 Context；
-5. 创建本次安装的 Fiber；
-6. 把新 Fiber 加入 Runtime 的实例集合；
-7. 把“启动并在以后卸载这个 Fiber”登记为父 Fiber 的 Effect；
-8. 返回新 Fiber。
+3. 按原始 Component 定义引用查找或创建 Runtime；
+4. 从父 Context 派生组件 Context，并依次应用单次安装的 `isolate`、静态和安装级 `inject` 配置、显式 `intercept`；
+5. 合并静态与安装级依赖名称；
+6. 创建本次安装的 Fiber；
+7. 把新 Fiber 加入 Runtime 的实例集合；
+8. 把“启动并在以后卸载这个 Fiber”登记为父 Fiber 的 Effect；
+9. 返回新 Fiber。
 
-步骤 7 是父子组件级联卸载成立的关键。
+步骤 8 是父子组件级联卸载成立的关键。
 
 ### 10.4 批量卸载
 
@@ -763,7 +799,13 @@ Component Runtime
 await app.registry.delete(workerComponent)
 ```
 
-`delete(component)` 会查找该定义当前的 Runtime，并并行调用其中所有 Fiber 的 `dispose()`。它针对的是这个定义当前产生的全部实例，而不是只卸载最近一次安装。
+`delete(component)` 会查找该精确定义当前的 Runtime，并并行调用其中所有 Fiber 的 `dispose()`。它等待全部清理尝试完成；一项失败时抛出原错误，多项失败时抛出 `AggregateError`，不会因较早拒绝而提前返回。
+
+### 10.5 生命周期观察
+
+`registry.subscribe(listener, { replay? })` 交付冻结的生命周期快照，事件类型是 `snapshot`、`installed`、`state` 和 `detached`。Fiber 状态先提交，再发出 `state`；`installed` 发生在安装 Fiber 登记后、启动 Effect 执行前；永久销毁进入 `DISPOSED` 后才发出 `detached`。
+
+事件中的 Fiber 快照只包含 ID、名称、父 Fiber ID、状态、状态时间和错误引用；Runtime 快照只包含 Runtime ID、名称、执行种类和 Fiber ID 数组，不暴露 Fiber、Context 或内部 Set。监听器返回值被忽略；抛错的监听器会自动移除并记录错误，不改变组件生命周期结果。订阅返回幂等 Disposer，组件内订阅者应通过 Effect 拥有它。详细边界记录在 [ADR-0008](./adr/0008-lifecycle-observation.md) 中。
 
 ## 11. 所有权树与级联卸载
 
@@ -790,6 +832,8 @@ Root Fiber
 - 根 Fiber 清理时可以级联清理整棵组件树；
 - 启动失败时，已经安装的子组件也能沿 Effect 所有权回滚；
 - 每个资源都有明确且唯一的生命周期所有者。
+
+主动调用子 `Fiber.dispose()` 时，Core 会先调用父 Fiber 中对应的安装 Effect disposer。因此销毁成功后，父级 Effect 栈和诊断树也会解除这条安装关系；父级稍后卸载不会重复清理子组件。
 
 ## 12. Event：带作用域和生命周期的消息派发
 
@@ -996,7 +1040,49 @@ Effect 表示需要撤销的副作用；Event 表示一件事情已经发生。�
 
 Context 的原型链作用域以及 `isolate()` 用于组织服务可见性和运行时所有权，不隔离文件系统、网络、环境变量或 JavaScript 全局对象。不可信代码需要真正的进程或容器沙箱。
 
-## 16. 当前实现与后续设计的边界
+## 16. Loader：稳定 Entry 到运行 Fiber 的映射
+
+`@nya/loader` 是 Core 之外的通用内存加载层。它作为 `loader` Service 显式安装，并把一棵稳定 Entry 树映射为 Core Component 与 Fiber：
+
+```ts
+import { Context } from '@nya/core'
+import { Loader } from '@nya/loader'
+
+const app = new Context()
+const loaderFiber = app.installComponent(Loader, {
+  resolver({ name }) {
+    if (name === 'worker') return (_ctx: Context) => undefined
+    throw new Error(`unknown component: ${name}`)
+  },
+})
+await loaderFiber
+
+const worker = await app.loader.create({
+  id: 'main-worker',
+  name: 'worker',
+  config: { concurrency: 2 },
+})
+```
+
+Entry ID 是配置控制面的稳定身份，`fiberId` 是当前一次安装身份。移动、禁用恢复或安装覆盖变化会产生新 Fiber，但 Entry ID 保持不变。`get()` 和 `entries()` 只返回冻结快照，不把内部可变树或 Fiber 对象交给调用方。
+
+Component Entry 通过可替换 Resolver 获得 Component；默认 Resolver 使用动态 `import()`，并只接受直接 Component 或 ESM default Component。Group Entry 不解析模块，只安装内建空 Component 来建立 Context、Fiber 和子树所有权边界。Group 上的 `intercept`、`isolate` 与 `baseUrl` 会通过 Context 或 Entry 祖先关系影响后代；这仍是运行时作用域，不是权限沙箱。
+
+Loader 的可观察状态为：
+
+| Entry 状态 | 含义 |
+| --- | --- |
+| `disabled` | 自身或祖先被禁用，当前没有运行实例 |
+| `resolving` | 正在解析模块或等待一次 Fiber 生命周期操作 |
+| `pending` | 已安装但缺少依赖，或正在等待父 Entry ACTIVE |
+| `active` | 当前 Fiber 已经 ACTIVE |
+| `failed` | 最近的解析、配置或组件生命周期尝试失败 |
+
+纯 `config` 更新复用当前 Fiber 并调用 `fiber.update()`；名称、类型、base URL、父级或安装覆盖变化只重新安装目标子树；同一父级内调整顺序不会重启。Component 启动或清理期间可以等待 `loader.create()` 声明新 Entry；若把当前仍在 LOADING 的 Entry 作为父级，新条目先保持 `pending`，父级 ACTIVE 后自动安装，而不会与 Loader 队列互相等待。解析或启动失败保存在目标 Entry 快照中，不阻止兄弟条目，`resolve(id)` 用于显式重试。`disabled` 会卸载但保留子树，`remove()` 会删除整棵 Entry 子树；Loader 自身卸载时，所有实例继续由 Core Effect 所有权级联清理。
+
+首版 Loader 不读取或写入 YAML / JSON，不监听文件，也不做模块缓存失效。文件适配器、管理界面和 HMR 应建立在这组 Entry 操作之上，而不是访问 Core 私有状态。完整边界见 [ADR-0009](./adr/0009-loader-entry-tree.md) 与 [`@nya/loader` README](../packages/loader/README.md)。
+
+## 17. 当前实现与后续设计的边界
 
 | 能力 | 当前状态 |
 | --- | --- |
@@ -1019,14 +1105,19 @@ Context 的原型链作用域以及 `isolate()` 用于组织服务可见性和�
 | 配置与依赖变化串行化、快速更新收敛 | 已实现 |
 | Service 调用方 Context 追踪 | 已实现 |
 | Service `thisArg` 隔离事件过滤 | 已实现 |
-| Context 拦截、callable Service 与 mixin | 尚未实现 |
+| Context intercept 与 Service 配置解析 | 已实现 |
+| 单次安装 inject / intercept / isolate 覆盖 | 已实现 |
+| Component 定义引用身份与只读 Runtime 快照 | 已实现 |
+| Registry 生命周期快照订阅 | 已实现 |
+| callable Service 与 mixin | 尚未实现 |
 | Logger、结构化生命周期日志与 Effect 树诊断 | 已实现 |
 | `@nya/logger-console` | 已实现为显式安装的外围组件 |
-| Loader、HMR 和其他外围生态 | 不属于当前 Core 阶段 |
+| `@nya/loader` 内存 Entry 树、Group 与 Resolver | 已实现为独立外围包 |
+| 文件配置持久化、HMR 和其他外围生态 | 尚未实现 |
 
 阅读源码或撰写示例时，应以这条边界为准。设计文档描述的是预期终态；本文描述的是当前可以依赖的基础心智模型。
 
-## 17. 贡献者需要维护的不变量
+## 18. 贡献者需要维护的不变量
 
 修改核心运行时行为时，至少应保持以下约束：
 
@@ -1049,5 +1140,10 @@ Context 的原型链作用域以及 `isolate()` 用于组织服务可见性和�
 17. 来源 Provider 或实际 owner 停止时，跨 Fiber 提供的下游服务必须先完成消费者失效与 facade/slot 关闭，再开始任一端的普通 Effect 清理。
 18. Logger 与 sink 失败不能改变 Fiber 状态、生命周期 Promise、原错误身份或 Effect 清理顺序。
 19. 诊断快照不能暴露可反向修改运行时的对象，也不能无限保留成功历史。
+20. Component Runtime 必须按原始定义引用区分；共享 `apply` 不能让两个对象定义合并。
+21. Service intercept 必须按调用方 Context 解析，不能写回 Provider 全局实例。
+22. Registry 观察者失败不能改变 Fiber 状态或生命周期 Promise，观察事件不能暴露内部可变集合。
+23. 主动销毁子 Fiber 必须解除父级安装 Effect；成功清理的 Disposer 不得继续被所属栈强引用。
+24. Loader Entry ID 不得与 Fiber ID 混用；结构变更只允许重建目标子树，纯配置更新应复用 Fiber。
 
 这些不变量比某个类的内部字段布局更重要。内部实现可以演进，但公开语义不应在没有相应设计和测试更新的情况下悄然改变。

@@ -4,12 +4,15 @@ import type { Context } from './context.js'
 import { DisposableStack, EffectScope } from './disposable.js'
 import type { CleanupSource, Disposer } from './disposable.js'
 import type { Component, ResolvedInject } from './component.js'
-import type { ComponentRuntime } from './registry.js'
+import type { ComponentRuntimeInternal } from './registry.js'
 import type { DependencySnapshot, ServiceAddress } from './service.js'
 import {
   fiberBeforeUnload,
+  fiberDisposeFromOwner,
   fiberGetServiceImplementation,
   fiberGetServiceSource,
+  fiberSetOwnerDisposer,
+  registryNotifyFiberState,
   serviceCapture,
   serviceInit,
   serviceSubscribe,
@@ -104,13 +107,13 @@ export class Fiber implements PromiseLike<void> {
   readonly parent: Fiber | null
   readonly inject: ResolvedInject
 
-  state: FiberState
-  stateSince = new Date().toISOString()
-  error: unknown
+  #state: FiberState
+  #stateSince = new Date().toISOString()
+  #error: unknown
 
   // ---------- 组件实例与安装输入 ----------
 
-  #runtime: ComponentRuntime | null
+  #runtime: ComponentRuntimeInternal | null
   #configInput: unknown
   #config: unknown
   #hasConfigError = false
@@ -168,13 +171,16 @@ export class Fiber implements PromiseLike<void> {
 
   #disposeOperation: Promise<void> | undefined
 
+  /** 普通组件由父 Fiber 的安装 Effect 所有；主动销毁要先摘除该 Effect。 */
+  #ownerDisposer: Disposer | undefined
+
   /** dispose() 已登记后发生的清理错误，最终在完成永久卸载后统一抛出。 */
   #disposeErrors: unknown[] | undefined
 
   private constructor(options: {
     context: Context
     parent: Fiber | null
-    runtime: ComponentRuntime | null
+    runtime: ComponentRuntimeInternal | null
     inject?: ResolvedInject
     config?: unknown
     detach?: () => void
@@ -185,7 +191,7 @@ export class Fiber implements PromiseLike<void> {
     this.inject = options.inject ?? new Set()
     this.#configInput = options.config
     this.#detach = options.detach
-    this.state = options.runtime ? FiberState.PENDING : FiberState.ACTIVE
+    this.#state = options.runtime ? FiberState.PENDING : FiberState.ACTIVE
 
     // 根 Fiber 本身始终是一轮可写运行；普通 Fiber 要等依赖满足后再创建栈。
     if (!options.runtime) {
@@ -201,7 +207,7 @@ export class Fiber implements PromiseLike<void> {
   static component(options: {
     context: Context
     parent: Fiber
-    runtime: ComponentRuntime
+    runtime: ComponentRuntimeInternal
     inject: ResolvedInject
     config?: unknown
     detach: () => void
@@ -221,6 +227,21 @@ export class Fiber implements PromiseLike<void> {
 
   get isRoot() {
     return this.#runtime === null
+  }
+
+  /** 当前生命周期状态；只能由 Fiber 内部状态机提交。 */
+  get state() {
+    return this.#state
+  }
+
+  /** 当前状态开始时间的 ISO 字符串。 */
+  get stateSince() {
+    return this.#stateSince
+  }
+
+  /** 最近一次生命周期失败；只读观察，不参与恢复控制。 */
+  get error() {
+    return this.#error
   }
 
   /** 当前已经通过 Schema 校验和转换的目标配置。 */
@@ -253,7 +274,7 @@ export class Fiber implements PromiseLike<void> {
     } catch (error) {
       this.#hasConfigError = true
       this.#configError = error
-      this.error = error
+      this.#error = error
     }
     this.refreshDependencies()
     return this
@@ -569,7 +590,7 @@ export class Fiber implements PromiseLike<void> {
         this.#configError = undefined
       } catch (error) {
         this.#configError = error
-        this.error = error
+        this.#error = error
         this.#scheduleReconcile()
         await this.awaitStable()
         return
@@ -580,13 +601,31 @@ export class Fiber implements PromiseLike<void> {
     this.#configVersion++
     this.#cleanupBlocked = false
     this.#failedTarget = undefined
-    this.error = undefined
+    this.#error = undefined
     this.#scheduleReconcile()
     await this.awaitStable()
   }
 
   /** 永久销毁 Fiber；与依赖失效导致的临时 unload 不同。 */
   dispose(): Promise<void> {
+    if (this.#disposeOperation) return this.#disposeOperation
+    if (this.#ownerDisposer) {
+      return Promise.resolve(this.#ownerDisposer())
+    }
+
+    return this[fiberDisposeFromOwner]()
+  }
+
+  /** Registry 在父级安装 Effect 建立后绑定其幂等清理入口。 */
+  [fiberSetOwnerDisposer](dispose: Disposer) {
+    if (this.isRoot || this.#ownerDisposer) {
+      throw new Error('fiber owner disposer is already assigned')
+    }
+    this.#ownerDisposer = dispose
+  }
+
+  /** 父级安装 Effect 内部使用的实际永久销毁入口。 */
+  [fiberDisposeFromOwner](): Promise<void> {
     if (this.#disposeOperation) return this.#disposeOperation
 
     this.#disposeReason ??= 'dispose'
@@ -671,7 +710,7 @@ export class Fiber implements PromiseLike<void> {
   async #reconcile() {
     while (!this.#disposeOperation) {
       if (this.#hasConfigError) {
-        this.error = this.#configError
+        this.#error = this.#configError
         this.#setState(FiberState.FAILED)
         this.#recordFailure('config', this.#configError)
         throw this.#configError
@@ -708,7 +747,7 @@ export class Fiber implements PromiseLike<void> {
 
       if (!desired) {
         this.#failedTarget = undefined
-        this.error = undefined
+        this.#error = undefined
         this.#setState(FiberState.PENDING)
         return
       }
@@ -755,8 +794,8 @@ export class Fiber implements PromiseLike<void> {
     this.#activeRun = ++this.#runCounter
     this.#diagnosticRun = this.#activeRun
     this.#activeConfigVersion = configVersion
+    this.#error = undefined
     this.#setState(FiberState.LOADING)
-    this.error = undefined
     this.#startupScopes = []
 
     try {
@@ -793,7 +832,7 @@ export class Fiber implements PromiseLike<void> {
         this.#recordDisposeError(failure)
       }
 
-      this.error = failure
+      this.#error = failure
       this.#runEffects = undefined
       this.#beforeUnload = undefined
       this.#activeSnapshot = undefined
@@ -864,6 +903,7 @@ export class Fiber implements PromiseLike<void> {
       await this.#unloadRun(stopReason)
     } catch (error) {
       cleanupFailure = error
+      if (!this.isRoot) this.#error = error
       this.#recordDisposeError(error)
       if (this.isRoot) {
         // Root 会立刻建立一个可复用的新运行。必须在 ACTIVE 状态日志派发前
@@ -877,9 +917,6 @@ export class Fiber implements PromiseLike<void> {
       this.#desiredSnapshot = undefined
       this.#failedTarget = undefined
 
-      this.#detach?.()
-      this.#detach = undefined
-
       if (this.isRoot) {
         // 根 Fiber 的 dispose 只清空整棵资源树，根 Context 之后仍可复用。
         this.#runEffects = new DisposableStack()
@@ -887,7 +924,7 @@ export class Fiber implements PromiseLike<void> {
         this.#beforeUnload = new Set()
         this.#disposeOperation = undefined
         this.#disposeReason = undefined
-        this.error = undefined
+        this.#error = undefined
         this.#setState(FiberState.ACTIVE, stopReason)
       } else {
         this.#setState(FiberState.DISPOSED, stopReason)
@@ -901,16 +938,22 @@ export class Fiber implements PromiseLike<void> {
 
     const errors = this.#disposeErrors ?? []
     this.#disposeErrors = undefined
-    if (errors.length === 0) return
+    if (errors.length === 0) {
+      this.#detach?.()
+      this.#detach = undefined
+      return
+    }
 
     const failure = errors.length === 1
       ? errors[0]
       : new AggregateError(errors, 'multiple errors while disposing fiber')
-    this.error = failure
+    this.#error = failure
+    this.#detach?.()
+    this.#detach = undefined
     throw failure
   }
 
-  #invoke(runtime: ComponentRuntime, config: unknown): CleanupSource {
+  #invoke(runtime: ComponentRuntimeInternal, config: unknown): CleanupSource {
     if (runtime.kind === 'function') {
       const apply = runtime.callback as Component.Function<any>
       return apply(this.context, config)
@@ -997,9 +1040,14 @@ export class Fiber implements PromiseLike<void> {
     const oldState = this.state
     if (oldState === state) return
 
-    this.state = state
-    this.stateSince = new Date().toISOString()
+    this.#state = state
+    this.#stateSince = new Date().toISOString()
     this.context.root.services.onFiberStateChange(this, oldState, state)
+    this.context.root.registry[registryNotifyFiberState](
+      this,
+      oldState,
+      stopReason,
+    )
     const phase: LifecyclePhase = state === FiberState.LOADING
       ? 'start'
       : state === FiberState.ACTIVE
@@ -1031,7 +1079,7 @@ export class Fiber implements PromiseLike<void> {
   }
 
   #failCleanup(error: unknown, stopReason?: FiberStopReason) {
-    this.error = error
+    this.#error = error
     this.#cleanupBlocked = true
     this.#failedTarget = undefined
     this.#recordDisposeError(error)
@@ -1087,7 +1135,7 @@ export class Fiber implements PromiseLike<void> {
     this.#configVersion++
     this.#cleanupBlocked = false
     this.#failedTarget = undefined
-    this.error = undefined
+    this.#error = undefined
     this.#scheduleReconcile()
     await this.awaitStable()
   }

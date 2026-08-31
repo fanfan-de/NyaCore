@@ -7,7 +7,7 @@
 
 本文记录 Nya 核心运行时的目标设计。状态为 Proposed 表示它可以指导讨论和实现，但不能单独证明某项能力已经存在；当前可观察行为以源码、导出类型、测试和[核心概念指南](./concepts.md)为证据。某段设计被接受后，实现、测试和公开 API 应逐步与其语义一致。
 
-当前已落地 Component、Context、Fiber、Effect、Registry、最小 Service 基类、Inject、严格服务隔离、Service 调用方 Context 追踪、隔离事件过滤、Event、同步 Config 生命周期、Logger 和 Effect 诊断。本文中的 Context 拦截、callable Service、mixin、Loader 和 HMR 仍是 Proposed，不应从目标设计推断它们已经可用。
+当前已落地 Component、Context、Fiber、Effect、按定义引用区分的 Registry、单次安装覆盖、Service、Inject、严格服务隔离、Service 调用方 Context、Context intercept、Registry 生命周期观察、Event、同步 Config 生命周期、Logger、Effect 诊断，以及独立的内存 `@nya/loader`。本文中的 callable Service、mixin、文件配置持久化和 HMR 仍是 Proposed，不应从目标设计推断它们已经可用。
 
 Nya 借鉴 Cordis 的设计思想，但不以逐文件复制 Cordis 为目标。第一阶段追求的是复现它最重要的运行语义：上下文作用域、动态服务依赖、组件生命周期和副作用回收。
 
@@ -212,7 +212,7 @@ class Component {
 }
 ```
 
-函数和 class 直接以自身作为 Runtime 键，对象以 `apply` 作为 Runtime 键。构造器判定沿用 Cordis：具有 `prototype` 的普通函数按构造器执行，箭头函数、async 函数、生成器和异步生成器按函数执行。
+函数、class 和对象都以传给 Core 的原始定义引用作为 Runtime 键；归一化后的 callback 只决定执行入口，不参与定义身份。两个对象即使共享 `apply` 也拥有不同 Runtime。构造器判定沿用 Cordis：具有 `prototype` 的普通函数按构造器执行，箭头函数、async 函数、生成器和异步生成器按函数执行。
 
 ### 5.2 组件元数据
 
@@ -224,7 +224,7 @@ interface ComponentMeta<Config = unknown> {
   inject?: Inject
   Config?: StandardSchemaV1<unknown, Config>
   provide?: string | string[]
-  intercept?: Record<string, boolean>
+  intercept?: Record<string, unknown>
 }
 ```
 
@@ -232,7 +232,7 @@ interface ComponentMeta<Config = unknown> {
 - `inject` 声明当前组件运行所必需的服务。
 - `Config` 校验并转换本次安装使用的配置。
 - `provide` 可作为类服务或工具链的静态提示。
-- `intercept` 为高级服务拦截机制保留。
+- `intercept` 是目标中的静态调用配置提示；当前实现通过对象形式 `inject` 或单次安装 options 提供 intercept。
 
 ### 5.3 返回值
 
@@ -501,7 +501,7 @@ Fiber 启动时应保存服务实现快照。组件运行期间读取 `ctx.datab
 
 ### 9.4 Service 基类
 
-> 实施状态：部分 Current。最小基类、调用方 Context 绑定、隔离事件过滤、`Service.init` 和 `Service.check` 已实现；其余高级协议仍是 Proposed。
+> 实施状态：部分 Current。基类、调用方 Context 绑定、隔离事件过滤、`Service.init`、`Service.check` 和调用配置解析已实现；callable 与派生对象协议仍是 Proposed。
 
 Nya 提供 Cordis 风格的 `Service` 基类，用于把类实例注册为服务：
 
@@ -521,12 +521,14 @@ class DatabaseService extends Service {
 
 - `Service.init`：依赖满足后的初始化；
 - `Service.check`：判断服务当前是否可用；
+- `Service.config`：声明 Service 调用配置类型；
+- `Service.resolveConfig`：按调用方 Context 读取 intercept 层；
+- `Service.mergeConfig`：可选的显式多层配置合并；
 - `Context.filter`：Service 作为事件 `thisArg` 时按调用方的服务隔离地址过滤局部监听器；
 - 调用方绑定：消费者读取 Service 时得到稳定 Proxy，普通方法的 `this.ctx` 指向调用方 Context；
 
 后续高级协议包括：
 
-- `Service.config`：服务拦截配置类型；
 - `Service.invoke`：把服务实例变成可调用对象；
 - `Service.extend`：创建保留服务上下文的派生对象。
 
@@ -534,7 +536,7 @@ callable Service、派生对象和 mixin 必须复用后续的调用方 Context 
 
 ## 10. 服务隔离、调用方追踪与拦截
 
-> 实施状态：部分 Current。服务寻址隔离、Service 调用方追踪及隔离事件过滤已实现；Context 拦截仍是 Proposed。
+> 实施状态：Current。服务寻址隔离、Service 调用方追踪、隔离事件过滤与 Context intercept 已实现。
 
 ### 10.1 隔离
 
@@ -577,7 +579,7 @@ testContext.provide('database', testDatabase)
 
 `ctx.intercept(name, config)` 为局部上下文附加服务配置。服务可以沿拦截原型链合并配置，从而让父作用域提供默认值、子作用域覆盖局部值。
 
-拦截改变服务在某个 Context 中的行为，不应直接修改服务的全局实例。
+拦截改变服务在某个调用 Context 中的行为，不直接修改服务的全局实例。默认 `Service.resolveConfig` 采用最后一层替换；Service 通过 `Service.mergeConfig` 显式选择字段级或其他合并。对象形式 Inject 的非 `undefined` 值成为组件 Context 上的 intercept 层，单次安装还可以追加 inject、intercept 和 isolate。
 
 ### 10.4 安全边界
 
@@ -587,15 +589,17 @@ testContext.provide('database', testDatabase)
 
 Registry 负责管理组件定义和运行实例。
 
-对于每个归一化后的组件回调，Registry 保存一份 Runtime：
+对于每个原始 Component 定义引用，Registry 保存一份内部 Runtime，并对外返回只读快照：
 
 ```ts
 interface ComponentRuntime {
-  name?: string
-  kind: 'function' | 'constructor'
-  callback: Function
-  Config?: StandardSchemaV1
-  fibers: Set<Fiber>
+  readonly id: number
+  readonly definition: Component
+  readonly name?: string
+  readonly kind: 'function' | 'constructor'
+  readonly callback: Function
+  readonly Config?: StandardSchemaV1
+  readonly fibers: readonly Fiber[]
 }
 ```
 
@@ -608,6 +612,8 @@ Registry 必须满足：
 - 当最后一个 Fiber 被销毁后，可以删除对应 Runtime；
 - 安装无效组件时立即抛出清晰错误；
 - 子组件的 Fiber 必须作为父 Fiber 的 Effect 登记。
+- `subscribe()` 只交付冻结的 Fiber / Runtime 生命周期快照，观察失败不参与生命周期结果；
+- 单次安装覆盖只能追加 inject、intercept 和 isolate，不能改写定义入口或 Schema。
 
 ## 12. Event
 
@@ -651,7 +657,7 @@ Nya 沿用 Cordis 的多种派发模式：
 
 ## 13. Config
 
-> 实施状态：Current。同步 Standard Schema 校验、配置更新与 Fiber 重启已实现；Loader 整合仍是 Proposed。
+> 实施状态：Current。同步 Standard Schema 校验、配置更新与 Fiber 重启已实现；内存 Loader 已通过公开 Fiber API 整合，文件配置仍是 Proposed。
 
 组件可以提供符合 Standard Schema 的 `Config`：
 
@@ -677,7 +683,7 @@ const component = {
 - `fiber.restart()` 使用当前已验证配置重启 ACTIVE Fiber，或重试 FAILED Fiber；初始 Schema 失败时重新校验原始输入，也可以通过合法 `update()` 恢复，缺少依赖时保持 PENDING。
 - DISPOSED Fiber 拒绝更新和重启；根 Fiber 仅支持清空 Effect 树并恢复 ACTIVE 的 `restart()`。
 
-Loader 可以在 Core 之外负责读取 YAML 或 JSON、保存修改以及把配置条目映射为 Fiber。
+Loader 已在 Core 之外负责把内存配置 Entry 映射为 Fiber。后续 Include / 文件适配器可以读取 YAML 或 JSON，并通过 Loader 公共操作保存或应用修改。
 
 ## 14. 错误处理与日志
 
@@ -785,7 +791,7 @@ packages/core/src/
 create-nya           项目脚手架
 ```
 
-其中 `@nya/logger-console` 已经 Current；其他条目仍是 Proposed。console 包通过显式安装 Component 订阅 Core 结构化记录，Core 导入和 console 包导入都不会自动输出。
+其中 `@nya/loader` 的内存 Entry 树、内建 Group Entry 与动态 import Resolver，以及 `@nya/logger-console` 已经 Current；Include、独立 Group 包、HMR、Timer 和脚手架仍是 Proposed。两个外围包都只依赖 Core 公开协议；Core 导入、Loader 导入和 console 包导入都不会自动安装组件或输出。
 
 这种分层保证 Core 不依赖文件系统、YAML、文件监听器或 Node 私有模块加载器。
 
@@ -847,25 +853,25 @@ create-nya           项目脚手架
 
 ### 阶段四：空间组合
 
-> 实施状态：部分 Current。服务隔离、调用方追踪、隔离事件过滤和最小 Service 基类已完成，其余能力仍是 Proposed。
+> 实施状态：部分 Current。服务隔离、调用方追踪、隔离事件过滤、Context intercept 和 Service 调用配置已完成，其余能力仍是 Proposed。
 
 已实现：
 
 - 服务隔离；
 - Service 调用方 Context 追踪；
 - Service `thisArg` 隔离事件过滤；
-- 最小 Service 基类、`Service.init` 与 `Service.check`。
+- Service 基类、`Service.init` 与 `Service.check`；
+- Context intercept、对象 Inject 配置值和 Service 配置解析。
 
 尚未实现：
 
-- Context 拦截；
 - callable Service、高级 Service 协议和 mixin。
 
 ### 阶段五：外围生态
 
-> 实施状态：部分 Current。`@nya/logger-console` 已实现；其余包仍是 Proposed。
+> 实施状态：部分 Current。`@nya/loader` 与 `@nya/logger-console` 已实现；其余包仍是 Proposed。
 
-`@nya/logger-console` 作为显式安装的 Component 订阅 Core Logger，导入没有输出副作用，卸载后停止输出。后续实现 Loader、Include、Group、Timer 和 HMR。外围包只能依赖 Core 的公开协议，不得通过修改 Core 私有状态工作。
+`@nya/loader` 作为显式安装的 Service 管理内存 Entry 树、Resolver、Group 所有权边界和 Entry 到 Fiber 的映射；纯配置更新复用 Fiber，结构变化只重建目标子树。`@nya/logger-console` 作为显式安装的 Component 订阅 Core Logger，导入没有输出副作用，卸载后停止输出。后续实现 Include、文件持久化、Timer 和 HMR。外围包只能依赖 Core 的公开协议，不得通过修改 Core 私有状态工作。
 
 ## 19. 最小测试矩阵
 
@@ -936,16 +942,17 @@ create-nya           项目脚手架
 - Component、Fiber、Effect、Service、Inject 和 Event 已接入同一套所有权与动态依赖生命周期；
 - 服务名与隔离标签共同定位服务 slot，隔离缺失时严格保持 PENDING；
 - Service 调用方 Context Proxy 与隔离事件过滤已实现；
-- 最小 Service 基类、`Service.init` 和 `Service.check` 已实现；
+- Service 基类、`Service.init`、`Service.check` 与调用方 intercept 配置已实现；
+- Registry 已按原始 Component 定义引用区分 Runtime，并提供冻结快照与生命周期订阅；
 - Standard Schema 同步校验、`fiber.update()`、`restart()` 和快速配置更新收敛已实现。
 - Context Logger、结构化生命周期记录、Effect 诊断树和最近失败快照已实现；
 - `@nya/logger-console` 已作为只依赖 Core 公开 API 的外围 Component 实现。
+- `@nya/loader` 已作为只依赖 Core 公开 API 的外围 Service 实现稳定 Entry 树、Resolver、Group、失败重试和串行协调。
 
 当前与本文目标之间的主要差距是：
 
-- Context 拦截；
 - callable Service、高级 Service 协议和 mixin；
-- Loader、Include、Group、Timer 和 HMR 等外围生态。
+- Include、文件持久化、Timer 和 HMR 等外围生态，以及更丰富的 Loader 批量事务与模块缓存协议。
 
 因此，后续应当在已有生命周期协调器和可观测性基础上继续完成空间组合与其他外围生态，而不是从阶段一重新开始。
 

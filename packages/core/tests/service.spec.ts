@@ -254,11 +254,13 @@ describe('service injection', () => {
   it('keeps inject metadata on each installation instead of shared runtime', async () => {
     const app = new Context()
     const apply = vi.fn()
-    const guarded = app.installComponent({
+    const guardedComponent = {
       inject: { database: { futureConfig: true } },
       apply,
-    })
-    const unguarded = app.installComponent({ apply })
+    }
+    const unguardedComponent = { apply }
+    const guarded = app.installComponent(guardedComponent)
+    const unguarded = app.installComponent(unguardedComponent)
 
     await Promise.all([guarded, unguarded])
 
@@ -266,9 +268,12 @@ describe('service injection', () => {
     expect(unguarded.state).toBe(FiberState.ACTIVE)
     expect(guarded.inject).toEqual(new Set(['database']))
     expect(unguarded.inject).toEqual(new Set())
-    expect(app.registry.get({ apply })?.fibers).toEqual(
-      new Set([guarded, unguarded]),
-    )
+    expect(
+      app.registry.get(guardedComponent)?.fibers.map(fiber => fiber.id),
+    ).toEqual([guarded.id])
+    expect(
+      app.registry.get(unguardedComponent)?.fibers.map(fiber => fiber.id),
+    ).toEqual([unguarded.id])
     expect(apply).toHaveBeenCalledOnce()
   })
 

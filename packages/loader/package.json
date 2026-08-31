@@ -1,0 +1,55 @@
+{
+  "name": "@nya/loader",
+  "version": "0.0.0",
+  "description": "In-memory component entry loader for the Nya runtime",
+  "keywords": [
+    "component-runtime",
+    "loader",
+    "lifecycle",
+    "typescript"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fanfan-de/NyaCore.git",
+    "directory": "packages/loader"
+  },
+  "homepage": "https://github.com/fanfan-de/NyaCore#readme",
+  "bugs": {
+    "url": "https://github.com/fanfan-de/NyaCore/issues"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "scripts": {
+    "build": "node scripts/clean-lib.mjs && tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "prepublishOnly": "npm --prefix ../.. run release:check"
+  },
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "LICENSE",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@nya/core": ">=0.0.0"
+  },
+  "devDependencies": {
+    "@nya/core": "0.0.0"
+  }
+}

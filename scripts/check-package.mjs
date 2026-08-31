@@ -22,6 +22,10 @@ const packageSpecifications = [
     name: '@nya/core',
   },
   {
+    directory: 'packages/loader',
+    name: '@nya/loader',
+  },
+  {
     directory: 'packages/logger-console',
     name: '@nya/logger-console',
   },
@@ -131,16 +135,24 @@ try {
   }, null, 2))
   writeFileSync(join(consumerRoot, 'index.ts'), `
 import { Context, FiberState, type Fiber, type LogRecord } from '@nya/core'
+import { Loader, type EntrySnapshot, type LoaderResolver } from '@nya/loader'
 import { ConsoleLogger, type ConsoleLoggerOptions } from '@nya/logger-console'
 
 const context = new Context()
 const fiber: Fiber = context.installComponent(() => undefined)
 const options: ConsoleLoggerOptions = { timestamps: false }
 const record: LogRecord | undefined = context.logger.records()[0]
+const resolver: LoaderResolver = async () => {
+  return () => undefined
+}
+const loader = context.installComponent(Loader, { resolver })
+const entry: EntrySnapshot | undefined = context.loader?.get('worker')
 context.installComponent(ConsoleLogger, options)
 void FiberState.ACTIVE
 void fiber
 void record
+void loader
+void entry
 `)
 
   const tarballs = packageResults.map(result => {
@@ -158,6 +170,7 @@ void record
     '--eval',
     `
       import { Context, FiberState } from '@nya/core'
+      import { Loader } from '@nya/loader'
       import { ConsoleLogger } from '@nya/logger-console'
       const app = new Context()
       const target = {
@@ -172,6 +185,18 @@ void record
         timestamps: false,
       })
       await logger
+      const loaderFiber = app.installComponent(Loader, {
+        resolver: async () => () => undefined,
+      })
+      await loaderFiber
+      const entry = await app.loader.create({
+        id: 'package-worker',
+        name: 'memory:worker',
+      })
+      if (entry.state !== 'active') {
+        throw new Error('Loader entry is not active')
+      }
+      await app.loader.remove(entry.id)
       app.logger.info('package check')
       if (app.fiber.state !== FiberState.ACTIVE) {
         throw new Error('root Fiber is not ACTIVE')

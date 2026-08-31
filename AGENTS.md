@@ -6,6 +6,8 @@
 
 - `packages/core/src/`：`@nya/core` 实现。
 - `packages/core/tests/`：核心行为测试。
+- `packages/loader/src/`：`@nya/loader` 的内存 Entry 树与生命周期协调。
+- `packages/loader/tests/`：Loader 行为测试。
 - `playground/`：示例与手动验证场景。
 - `docs/concepts.md`：当前实现的概念说明。
 - `docs/design.md`：提议中的目标设计；不能单独证明功能已实现。

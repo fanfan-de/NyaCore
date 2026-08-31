@@ -175,7 +175,10 @@ describe('component lifecycle', () => {
     const second = app.installComponent(component)
     await Promise.all([first, second])
 
-    expect(app.registry.get(component)?.fibers).toEqual(new Set([first, second]))
+    expect(app.registry.get(component)?.fibers.map(fiber => fiber.id)).toEqual([
+      first.id,
+      second.id,
+    ])
 
     await app.registry.delete(component)
 
@@ -411,6 +414,32 @@ describe('component lifecycle', () => {
     expect(parentDispose).toHaveBeenCalledOnce()
     expect(childDispose).toHaveBeenCalledOnce()
     expect(child.state).toBe(FiberState.DISPOSED)
+  })
+
+  it('removes a manually disposed child from its parent ownership tree', async () => {
+    const app = new Context()
+    const childDispose = vi.fn()
+    let child!: Fiber
+
+    const parent = app.installComponent({
+      name: 'parent',
+      apply(context) {
+        child = context.installComponent({
+          name: 'child',
+          apply: () => childDispose,
+        })
+      },
+    })
+
+    await parent
+    await child
+    expect(parent.inspect().children).toHaveLength(1)
+
+    await child.dispose()
+    expect(parent.inspect().children).toHaveLength(0)
+
+    await parent.dispose()
+    expect(childDispose).toHaveBeenCalledOnce()
   })
 
   it('rolls back effects when component startup fails', async () => {

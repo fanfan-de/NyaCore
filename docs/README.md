@@ -8,6 +8,7 @@
 | --- | --- | --- | --- |
 | 快速理解当前架构 | [架构总览](./architecture.md) | Explanation | Current |
 | 理解当前运行时 | [核心概念](./concepts.md) | Explanation | Current |
+| 理解 Loader Entry 树 | [ADR-0009](./adr/0009-loader-entry-tree.md) | ADR | Accepted |
 | 理解 Logger 与诊断边界 | [ADR-0005](./adr/0005-runtime-observability.md) | ADR | Accepted |
 | 了解目标架构 | [核心设计](./design.md) | Specification | Proposed |
 | 查看技术决策 | [架构决策记录](./adr/README.md) | ADR | 按条目确定 |
@@ -23,7 +24,7 @@
 
 判断当前版本实际做什么时，按以下证据核对：
 
-1. `packages/core/src/` 与 `packages/logger-console/src/` 中的实现和导出类型；
+1. `packages/core/src/`、`packages/loader/src/` 与 `packages/logger-console/src/` 中的实现和导出类型；
 2. 相应包测试中可重复运行的行为测试；
 3. `docs/concepts.md` 中对上述行为的解释。
 
@@ -66,3 +67,4 @@
 - 新建决策记录时，从 [ADR 模板](./adr/0000-template.md)复制结构并分配下一个编号。
 - 当前文档体系的建立原因记录在 [ADR-0001](./adr/0001-repository-documentation.md)。
 - Logger 不影响生命周期、1000 条缓冲、诊断保留范围和 console 包边界记录在 [ADR-0005](./adr/0005-runtime-observability.md)。
+- 稳定 Entry、Group、Resolver 和 Loader 到 Fiber 的映射记录在 [ADR-0009](./adr/0009-loader-entry-tree.md)。

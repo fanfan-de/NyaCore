@@ -110,7 +110,7 @@ describe('component config schema', () => {
     expect(third.config).toEqual({ value: 30 })
   })
 
-  it('uses the first schema stored for definitions sharing one callback', async () => {
+  it('keeps schemas separate for object definitions sharing one callback', async () => {
     const app = new Context()
     const received: number[] = []
     const apply: Component.Function<NumberConfig> = (_context, config) => {
@@ -131,9 +131,9 @@ describe('component config schema', () => {
     }, {} as NumberConfig)
     await second
 
-    expect(received).toEqual([1, 1])
-    expect(firstValidate).toHaveBeenCalledTimes(2)
-    expect(secondValidate).not.toHaveBeenCalled()
+    expect(received).toEqual([1, 2])
+    expect(firstValidate).toHaveBeenCalledOnce()
+    expect(secondValidate).toHaveBeenCalledOnce()
   })
 
   it('reports Standard Schema issues and fails before entering the component', async () => {
