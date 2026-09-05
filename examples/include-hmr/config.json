@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "jobs",
+      "type": "include",
+      "path": "./jobs.json"
+    }
+  ]
+}

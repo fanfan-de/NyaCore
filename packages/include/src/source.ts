@@ -40,6 +40,7 @@ export async function readGraph(
   const load = async (file: string, prefix: string, parentId: string) => {
     file = resolve(file)
     watchPaths.add(file)
+    if (!file.toLowerCase().endsWith('.json')) throw new DocumentError(file, 'expected a .json configuration file')
     const canonical = await realpath(file)
     if (loading.has(canonical)) throw new DocumentError(file, 'include cycle')
     if (seen.has(canonical)) throw new DocumentError(file, 'source is mounted more than once')
@@ -91,7 +92,7 @@ export async function checkSources(sources: ReadonlyMap<string, ConfigSource>) {
   }
 }
 export async function writeSource(source: SourceRecord, document: IncludeDocument): Promise<SourceRecord> {
-  const text = serializeConfig(document, source.filename, source.text)
+  const text = serializeConfig(document, source.filename)
   const temporary = source.filename + '.' + randomUUID() + '.tmp'
   try {
     await writeFile(temporary, text, { flag: 'wx' })

@@ -103,21 +103,22 @@ it('migrates surviving descendants before deleting ancestors and preserves undec
   await root.fiber.dispose()
 })
 
-it('reads YAML include mounts, writes to the owning source and keeps YAML comments', async () => {
+it('reads JSON include mounts and writes only to the owning source', async () => {
   const { directory, path, root, include } = await fixture()
-  const yaml = join(directory, 'tasks.yml')
-  await writeFile(yaml, '# tasks\nversion: 1\nentries:\n  - id: worker # identity\n    name: missing\n    disabled: true\n')
-  await writeFile(path, JSON.stringify({ version: 1, entries: [{ id: 'tasks', type: 'include', path: './tasks.yml' }] }))
+  const tasks = join(directory, 'tasks.json')
+  await writeFile(tasks, JSON.stringify({ version: 1, entries: [{ id: 'worker', name: 'missing', disabled: true }] }))
+  const parentText = JSON.stringify({ version: 1, entries: [{ id: 'tasks', type: 'include', path: './tasks.json' }] })
+  await writeFile(path, parentText)
   const report = await include.refresh()
   expect(report.sources).toHaveLength(2)
-  expect(include.source(include.entryId('worker', ['tasks']))?.filename).toBe(yaml)
+  expect(include.source(include.entryId('worker', ['tasks']))?.filename).toBe(tasks)
   expect(root.loader.get(include.entryId('worker', ['tasks']))?.state).toBe('disabled')
-  await include.save({ version: 1, entries: [{ id: 'worker', name: 'missing', disabled: true, config: 3 }] }, yaml)
-  const updated = await readFile(yaml, 'utf8')
-  expect(updated).toContain('# tasks')
-  expect(updated).toContain('# identity')
-  expect(JSON.parse(await readFile(path, 'utf8')).entries[0].path).toBe('./tasks.yml')
-  await writeFile(yaml, 'version: 1\nentries:\n  - id: cycle\n    type: include\n    path: "./' + '配置 #%.json' + '"\n')
+  const next: IncludeDocument = { version: 1, entries: [{ id: 'worker', name: 'missing', disabled: true, config: 3 }] }
+  await include.save(next, tasks)
+  expect(JSON.parse(await readFile(tasks, 'utf8'))).toEqual(next)
+  expect(root.loader.get('app/tasks/worker')?.config).toBe(3)
+  expect(await readFile(path, 'utf8')).toBe(parentText)
+  await writeFile(tasks, JSON.stringify({ version: 1, entries: [{ id: 'cycle', type: 'include', path: './配置 #%.json' }] }))
   await expect(include.refresh()).rejects.toThrow('cycle')
   expect(root.loader.get('app/tasks/worker')?.state).toBe('disabled')
 })
@@ -164,7 +165,7 @@ it('rejects lifecycle self-waits and shuts down without keeping the Loader alive
   expect(fixtureValue.fiber.state).toBe(FiberState.DISPOSED)
 })
 
-it('rejects ambiguous YAML and duplicate sources while retaining stable isolation labels', async () => {
+it('rejects duplicate JSON sources while retaining stable isolation labels', async () => {
   const { include, root, path, directory } = await fixture({ version: 1, entries: [
     { id: 'a', type: 'group', isolate: { clock: 'private' } },
     { id: 'b', type: 'group', isolate: { clock: 'private' } },
@@ -173,15 +174,13 @@ it('rejects ambiguous YAML and duplicate sources while retaining stable isolatio
   const first = root.loader.get('app/a')!
   expect(first.isolate?.clock).toBe(root.loader.get('app/b')?.isolate?.clock)
   expect((await include.refresh()).operations).toEqual([])
-  const yaml = join(directory, 'bad.yml')
+  const shared = join(directory, 'shared.json')
   await writeFile(path, JSON.stringify({ version: 1, entries: [
-    { id: 'one', type: 'include', path: './bad.yml' },
-    { id: 'two', type: 'include', path: './bad.yml' },
+    { id: 'one', type: 'include', path: './shared.json' },
+    { id: 'two', type: 'include', path: './shared.json' },
   ] }))
-  await writeFile(yaml, 'version: 1\nentries: []\n')
+  await writeFile(shared, JSON.stringify({ version: 1, entries: [] }))
   await expect(include.refresh()).rejects.toThrow('more than once')
-  await writeFile(yaml, 'version: 1\nentries: &items []\nextra: *items\n')
-  await expect(include.refresh()).rejects.toThrow('aliases')
   expect(root.loader.get('app/a')?.fiberId).toBe(first.fiberId)
   const invalid = [
     { version: 1, entries: [{ id: 'x', type: null }] },
@@ -189,4 +188,57 @@ it('rejects ambiguous YAML and duplicate sources while retaining stable isolatio
     { version: 1, entries: [{ id: 'x', name: 'x', config: [1, , 3] }] },
   ]
   for (const document of invalid) expect(() => validateDocument(document)).toThrow()
+})
+
+it.each(['.yaml', '.yml', '.YAML', '.jsonc'])('rejects %s root files even when preview supplies a valid document', async extension => {
+  const { root, directory, include } = await fixture()
+  await include.close()
+  const path = join(directory, 'config' + extension)
+  const document: IncludeDocument = { version: 1, entries: [] }
+  const text = JSON.stringify(document)
+  await writeFile(path, text)
+  await root.installComponent(Include, { path, id: 'unsupported' })
+  await expect(root.include.refresh()).rejects.toThrow('expected a .json configuration file')
+  await expect(root.include.preview(document)).rejects.toThrow('expected a .json configuration file')
+  await expect(root.include.save(document)).rejects.toThrow('refresh before editing a mounted source')
+  expect(root.loader.entries()).toEqual([])
+  expect(await readFile(path, 'utf8')).toBe(text)
+})
+
+it.each(['.yaml', '.yml'])('rejects nested %s sources before changing files or active components', async extension => {
+  const { root, directory, include, path } = await fixture(
+    { version: 1, entries: [{ id: 'worker', name: 'worker' }] },
+    new Map([['worker', () => undefined]]),
+  )
+  await include.refresh()
+  const fiberId = root.loader.get('app/worker')!.fiberId
+  const original = await readFile(path, 'utf8')
+  const filename = 'tasks' + extension
+  await writeFile(join(directory, filename), JSON.stringify({ version: 1, entries: [] }))
+  const next: IncludeDocument = { version: 1, entries: [{ id: 'tasks', type: 'include', path: './' + filename }] }
+  await expect(include.preview(next)).rejects.toThrow('expected a .json configuration file')
+  await expect(include.save(next)).rejects.toThrow('expected a .json configuration file')
+  expect(await readFile(path, 'utf8')).toBe(original)
+  await writeFile(path, JSON.stringify(next))
+  await expect(include.refresh()).rejects.toThrow('expected a .json configuration file')
+  expect(root.loader.get('app/worker')?.fiberId).toBe(fiberId)
+  expect(root.loader.get('app/worker')?.state).toBe('active')
+  expect(root.loader.get('app/tasks')).toBeUndefined()
+})
+
+it.each([
+  'version: 1\nentries: []\n',
+  '{ "version": 1, "entries": [] } // comment',
+  '{ "version": 1, "entries": [], }',
+])('rejects non-JSON syntax without stopping the accepted tree: %s', async text => {
+  const { root, include, path } = await fixture(
+    { version: 1, entries: [{ id: 'worker', name: 'worker' }] },
+    new Map([['worker', () => undefined]]),
+  )
+  await include.refresh()
+  const fiberId = root.loader.get('app/worker')!.fiberId
+  await writeFile(path, text)
+  await expect(include.refresh()).rejects.toThrow()
+  expect(root.loader.get('app/worker')?.fiberId).toBe(fiberId)
+  expect(root.loader.get('app/worker')?.state).toBe('active')
 })

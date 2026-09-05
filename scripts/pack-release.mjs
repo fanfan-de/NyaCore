@@ -226,7 +226,7 @@ export function createReleaseBundle(destination, packages) {
     target,
     content: rewriteMarkdown(readFileSync(join(repositoryRoot, source), 'utf8'), source, target, repositoryUrl),
   }))
-  const hmrExampleFiles = ['main.mjs', 'worker.mjs', 'message.mjs', 'config.yml', 'jobs.yml', 'package.json']
+  const hmrExampleFiles = ['main.mjs', 'worker.mjs', 'message.mjs', 'config.json', 'jobs.json', 'package.json']
   const hmrExample = hmrExampleFiles.map(file => ({
     file, content: readFileSync(join(repositoryRoot, 'examples/include-hmr', file), 'utf8'),
   }))

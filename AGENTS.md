@@ -8,7 +8,7 @@
 - `packages/core/tests/`：核心行为测试。
 - `packages/loader/src/`：`@nya/loader` 的内存 Entry 树与生命周期协调。
 - `packages/loader/tests/`：Loader 行为测试。
-- `packages/include/`：JSON/YAML 文件声明、持久化与来源图，以及行为测试。
+- `packages/include/`：JSON 文件声明、持久化与来源图，以及行为测试。
 - `packages/hmr/`：配置监听、ESM 模块版本与替换，以及行为测试。
 - `examples/include-hmr/`：配置与同进程热替换的独立宿主示例。
 - `playground/`：示例与手动验证场景。

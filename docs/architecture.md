@@ -37,7 +37,7 @@ flowchart LR
         Host["宿主应用"]
         Core["@nya/core<br/>作用域运行时"]
         Loader["@nya/loader<br/>内存 Entry 树与模块解析"]
-        Include["@nya/include<br/>JSON/YAML 来源与保存"]
+        Include["@nya/include<br/>JSON 来源与保存"]
         Hmr["@nya/hmr<br/>监听与 ESM 版本图"]
         ConsoleLogger["@nya/logger-console<br/>可选控制台 sink"]
         Timer["@nya/timer<br/>调用方所有的 timeout / interval"]
@@ -425,7 +425,7 @@ flowchart LR
 | 领域 | 当前架构 | 仍属目标设计 |
 | --- | --- | --- |
 | Component | 函数、class、对象定义；每次安装独立 Context 与 Fiber；Loader Entry 树；外围 HMR 本地 ESM 版本替换 | 任意模块形式热替换与业务状态迁移 |
-| Config | 同步 Schema 与配置生命周期；Loader 原始配置；外围 Include JSON/YAML 持久化和来源监听 | 跨文件事务与多进程并发写入 |
+| Config | 同步 Schema 与配置生命周期；Loader 原始配置；外围 Include JSON 持久化和来源监听 | 跨文件事务与多进程并发写入 |
 | Service | `(服务名, 隔离标签)` 严格寻址；Inject 快照按地址驱动消费者启停；调用方 Context Proxy、intercept 配置、`init`、`check` 与配置合并协议 | callable Service、`extend` 与 mixin |
 | Effect | CleanupSource、失败回滚、幂等 LIFO 清理、聚合错误和结构化诊断树 | 更丰富的宿主资源探针 |
 | Event | 生命周期绑定、Context 过滤和五种派发模式；Service `thisArg` 按调用方隔离地址过滤 | 更完整的业务级事件调试工具 |

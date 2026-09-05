@@ -1,6 +1,4 @@
 /** 可往返的声明数据；与 Loader 运行快照分离。 */
-import { isAlias, isMap, isScalar, isSeq, parseDocument } from 'yaml'
-import type { Document, Node } from 'yaml'
 
 export type JsonValue = null | boolean | number | string | readonly JsonValue[] | { readonly [key: string]: JsonValue }
 export interface IncludeEntry {
@@ -112,50 +110,15 @@ export function validateDocument(input: unknown, source = '$'): IncludeDocument 
   return data as unknown as IncludeDocument
 }
 
-function checkYaml(node: unknown, source: string) {
-  if (isAlias(node)) throw new DocumentError(source, 'YAML aliases are not supported')
-  if (isMap(node)) for (const pair of node.items) {
-    if (!isScalar(pair.key) || typeof pair.key.value !== 'string') throw new DocumentError(source, 'YAML keys must be strings')
-    checkYaml(pair.value, source)
-  }
-  if (isSeq(node)) for (const child of node.items) checkYaml(child, source)
-}
 export function parseConfig(text: string, filename: string): IncludeDocument {
-  if (/\.ya?ml$/i.test(filename)) {
-    const doc = parseDocument(text, { uniqueKeys: true, version: '1.2' })
-    if (doc.errors.length || doc.warnings.length) throw new DocumentError(filename, [...doc.errors, ...doc.warnings].map(e => e.message).join('\n'))
-    checkYaml(doc.contents, filename)
-    return validateDocument(doc.toJS({ maxAliasCount: 0 }), filename)
-  }
-  if (!filename.toLowerCase().endsWith('.json')) throw new DocumentError(filename, 'expected .json, .yaml or .yml')
+  if (!filename.toLowerCase().endsWith('.json')) throw new DocumentError(filename, 'expected a .json configuration file')
   try { return validateDocument(JSON.parse(text), filename) } catch (error) {
     if (error instanceof DocumentError) throw error
     throw new DocumentError(filename, error instanceof Error ? error.message : String(error))
   }
 }
 
-// 更新 YAML 节点而非重新 dump 整棵树；条目数组按 id 配对，保留未改节点注释。
-function patchNode(doc: Document, node: unknown, value: JsonValue): Node {
-  if (isMap(node) && value && typeof value === 'object' && !Array.isArray(value)) {
-    for (const pair of [...node.items]) if (!Object.hasOwn(value, String(isScalar(pair.key) ? pair.key.value : ''))) node.delete(pair.key)
-    for (const [key, child] of Object.entries(value)) node.set(key, patchNode(doc, node.get(key, true), child))
-    return node
-  }
-  if (isSeq(node) && Array.isArray(value)) {
-    const old = [...node.items]
-    node.items = value.map((child, i) => {
-      const id = child && typeof child === 'object' && !Array.isArray(child) ? Reflect.get(child, 'id') : undefined
-      const previous = id === undefined ? old[i] : old.find(item => isMap(item) && item.get('id') === id)
-      return patchNode(doc, previous, child)
-    })
-    return node
-  }
-  if (isScalar(node) && Object.is(node.value, value)) return node
-  return doc.createNode(value)
-}
-export function serializeConfig(document: IncludeDocument, filename: string, previous = ''): string {
-  if (!/\.ya?ml$/i.test(filename)) return JSON.stringify(document, null, 2) + '\n'
-  const doc: Document = parseDocument(previous)
-  doc.contents = patchNode(doc, doc.contents, document as unknown as JsonValue)
-  return String(doc)
+export function serializeConfig(document: IncludeDocument, filename: string): string {
+  if (!filename.toLowerCase().endsWith('.json')) throw new DocumentError(filename, 'expected a .json configuration file')
+  return JSON.stringify(document, null, 2) + '\n'
 }

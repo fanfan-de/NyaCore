@@ -34,7 +34,7 @@ import { Hmr } from '@nya/hmr'
 const filename = name => join(dirname(fileURLToPath(import.meta.url)), name)
 const source = filename('./组件 # %.mjs')
 const config = filename('./config.json')
-const jobs = filename('./jobs.yml')
+const jobs = filename('./jobs.json')
 const helper = filename('./shared.mjs')
 const lazy = filename('./lazy.mjs')
 const events = []
@@ -113,10 +113,10 @@ try {
   assert.equal(saved.saved, true)
   assert.equal(saved.status, 'applied')
   assert.equal(active, 1)
-  const yaml = await readFile(jobs, 'utf8')
-  assert.ok(yaml.includes('# jobs comment'))
-  assert.ok(!yaml.includes('fiberId'))
-  assert.equal(JSON.parse(await readFile(config, 'utf8')).entries[0].path, './jobs.yml')
+  const json = await readFile(jobs, 'utf8')
+  assert.deepEqual(JSON.parse(json), changed)
+  assert.ok(!json.includes('fiberId'))
+  assert.equal(JSON.parse(await readFile(config, 'utf8')).entries[0].path, './jobs.json')
   await app.include.close()
   assert.equal(active, 0)
   await app.installComponent(Include, { path: config, id: 'restored' })
@@ -130,7 +130,7 @@ try {
   await unlink(jobs)
   await assert.rejects(app.include.refresh())
   assert.equal(active, 1)
-  await writeFile(jobs, yaml)
+  await writeFile(jobs, json)
   assert.equal((await app.include.refresh()).operations.length, 0)
   await app.loader.create({ id: 'lazy-cleanup', name: pathToFileURL(lazy).href })
 } finally {
@@ -157,10 +157,11 @@ export function checkIncludeHmrConsumer(temporaryRoot, consumerRoot, releaseDire
   writeFileSync(join(directory, 'lazy.mjs'), 'export default ctx => () => import("./lazy-cleanup.mjs").then(module => module.finish(ctx))')
   writeFileSync(join(directory, 'lazy-cleanup.mjs'), 'export const finish = ctx => ctx.logger.info("native lazy cleanup completed")')
   writeFileSync(join(directory, 'config.json'), JSON.stringify({ version: 1, entries: [
-    { id: 'jobs', type: 'include', path: './jobs.yml' },
+    { id: 'jobs', type: 'include', path: './jobs.json' },
   ] }))
-  writeFileSync(join(directory, 'jobs.yml'), '# jobs comment\nversion: 1\nentries:\n'
-    + ['a', 'b'].map(id => '  - id: ' + id + '\n    name: ./组件%20%23%20%25.mjs\n    config:\n      label: ' + id + '\n').join(''))
+  writeFileSync(join(directory, 'jobs.json'), JSON.stringify({ version: 1, entries:
+    ['a', 'b'].map(id => ({ id, name: './组件%20%23%20%25.mjs', config: { label: id } })),
+  }))
   try {
     const output = execFileSync(process.execPath, [join(directory, 'main.mjs')], {
       cwd: otherCwd, encoding: 'utf8', windowsHide: true, timeout: 30_000,

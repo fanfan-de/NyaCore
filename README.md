@@ -247,7 +247,7 @@ console.log(worker.state) // active
 NyaCore/
 ├── packages/core/       # @nya/core 源码、构建配置与测试
 ├── packages/loader/     # @nya/loader 内存 Entry 树与模块解析
-├── packages/include/    # JSON/YAML 来源配置、预览与保存
+├── packages/include/    # JSON 来源配置、预览与保存
 ├── packages/hmr/        # 配置监听与同进程 ESM 代码替换
 ├── packages/logger-console/ # 可选的 @nya/logger-console 输出组件
 ├── packages/timer/      # 调用方 Effect 管理的 timeout / interval
@@ -276,7 +276,7 @@ npm run check
 | `npm run package:check` | 构建、打包并以外部消费者方式验证六个发布包 |
 | `npm run release:check` | 运行完整仓库检查和 npm 包发布前验证 |
 | `npm run release:pack` | 构建本地候选目录，附带六包、摘要、教程与独立应用，不发布 npm |
-| `npm run dev:include-hmr` | 运行 JSON/YAML 配置与同进程代码替换示例 |
+| `npm run dev:include-hmr` | 运行 JSON 配置与同进程代码替换示例 |
 | `npm run api:check` / `api:update` | 比对构建后声明基线；有意变更经过兼容审查后再更新 |
 | `npm run playground` | 构建 Core 并运行全部示例场景 |
 | `npm run example:pack` | 构建 Nya 包并生成可搬移的 `artifacts/task-journal/` 应用目录 |
@@ -303,7 +303,7 @@ npm run check
 
 ## 当前边界
 
-[`@nya/include`](./packages/include/README.md) 已提供 JSON/YAML 多文件声明、预览、保存与恢复；[`@nya/hmr`](./packages/hmr/README.md) 提供可选配置监听和本地 ESM/TS 同进程热替换。可用 `npm run dev:include-hmr` 运行[专用示例](./examples/include-hmr/README.md)。Loader 继续只管理内存 Entry，两个新包通过其公开操作协调。
+[`@nya/include`](./packages/include/README.md) 已提供 JSON 多文件声明、预览、保存与恢复；[`@nya/hmr`](./packages/hmr/README.md) 提供可选配置监听和本地 ESM/TS 同进程热替换。可用 `npm run dev:include-hmr` 运行[专用示例](./examples/include-hmr/README.md)。Loader 继续只管理内存 Entry，两个新包通过其公开操作协调。
 
 callable Service、mixin 和异步 Standard Schema 校验仍未实现。HMR 不覆盖任意 Node 加载方式，达到 ESM 版本上限时请求宿主重启。运行时诊断不会自动发现绕过 Core 所有权协议创建的宿主资源，也不会以超时自动中断 cleanup。
 

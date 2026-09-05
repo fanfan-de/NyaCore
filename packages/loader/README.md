@@ -2,7 +2,7 @@
 
 `@nya/loader` 是 Nya 的通用内存组件加载层。它把稳定的 Entry 树映射为 `@nya/core` Fiber，并负责模块解析、配置更新、父子所有权、禁用恢复、移动和失败重试。
 
-它不读取或写入配置文件，也不监听文件变化。[Include](../include/README.md) 的 YAML/JSON 持久化与[HMR](../hmr/README.md) 已建立在这层公开 API 之上。
+它不读取或写入配置文件，也不监听文件变化。[Include](../include/README.md) 的 JSON 持久化与[HMR](../hmr/README.md) 已建立在这层公开 API 之上。
 
 ## 外围控制器的版本检查
 

@@ -24,7 +24,7 @@
 | 依赖刷新 | `fiber.refreshDependencies()` 显式重新捕获依赖，随后 `await fiber.awaitStable()`；读取诊断与单纯 `restart()` 不重新运行 `Service.check` |
 | Loader | Entry 输入与冻结快照、默认或自定义 Resolver、创建/更新/移动/禁用/删除和显式恢复 |
 | Loader 替换 | 声明版本检查、有效解析请求、成组定义与 Resolver 提交、提交前取消；失败报告不等于回滚 |
-| Include | version 1 JSON/YAML 声明、文件来源、命名空间、预览和单文件保存；运行失败可以晚于成功保存 |
+| Include | version 1 JSON 声明、文件来源、命名空间、预览和单文件保存；运行失败可以晚于成功保存 |
 | HMR | 显式本地 ESM/TS 入口、配置监听、模块代数与替换报告、上一代回退和关闭；具体模块支持范围见包 README |
 | 日志与诊断 | 声明中的字段、状态和事件码；允许新增可选字段，消费者不得拒绝未知对象字段；实际消息文字、ID 数值、时间与无关并发事件的交错不是固定输出 |
 | Timer 与 ConsoleLogger | 两个可选组件各自声明的配置、服务方法、错误和资源归属语义 |
@@ -45,7 +45,7 @@
 
 支持 Node.js **≥22.12.0**，发布 ESM JavaScript 和声明；教程使用 TypeScript **5.9.3**、`strict` 和 `NodeNext` 验证。`require('@nya/core')`、浏览器打包器、非 Node 宿主、任意 TypeScript 旧版不在当前验收矩阵内。普通 Loader 使用构建后的 `.js` / `.mjs`；显式 HMR 模式可以检查并转换受管 TS 源文件。
 
-Include 使用 YAML 1.2 的 JSON 数据子集，拒绝别名、复杂键和自定义标签。HMR 固定使用 TypeScript 5.9.3 和 import-meta-resolve 4.2.0，保留 ESM 模块边界；不自动热替换 npm 依赖、CommonJS、原生扩展或任意动态路径。包或构建环境变化与导入代数上限请求宿主重启。完整边界见[Include](../packages/include/README.md)和[HMR](../packages/hmr/README.md)。
+Include 的根文件和 include 来源只支持 `.json` 与标准 JSON 语法，不支持 YAML、JSONC、注释或尾随逗号。JSON-only 是相对旧候选的显式格式变更；旧 YAML 配置需要转换为 JSON 并更新宿主入口和全部 include 路径，见[迁移指南](./how-to/migrate-0.1.md#6-迁移已有-yaml-配置)。HMR 固定使用 TypeScript 5.9.3 和 import-meta-resolve 4.2.0，保留 ESM 模块边界；不自动热替换 npm 依赖、CommonJS、原生扩展或任意动态路径。包或构建环境变化与导入代数上限请求宿主重启。完整边界见[Include](../packages/include/README.md)和[HMR](../packages/hmr/README.md)。
 
 默认 Resolver 接受 `default` 导出的组件，宿主应显式给出绝对 `file:` 基址：模块 URL 使用 `import.meta.url`，目录 URL 必须以 `/` 结尾。相对名称及裸 npm 包名都从该基址解析，后者遵循 ESM 的 `node` / `import` 条件和包的 `exports` / `imports`。无基址的相对名称明确失败；无基址的裸包名仍相对 Loader 模块解析，不能保证指向宿主项目。
 

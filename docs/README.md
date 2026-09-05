@@ -26,6 +26,7 @@
 | 评审配置文件与运行状态的边界 | [ADR-0014](./adr/0014-config-persistence-boundary.md) | ADR | Proposed |
 | 规划 Include、配置监听与代码热替换 | [Include 与 HMR 实施计划](./include-hmr-plan.md) | Specification | Proposed |
 | 评审模块版本和公开替换边界 | [ADR-0015](./adr/0015-module-generations-and-replacement.md) | ADR | Proposed |
+| 了解配置格式统一为 JSON 的决策 | [ADR-0016](./adr/0016-json-only-configuration.md) | ADR | Proposed |
 | 查看技术决策 | [架构决策记录](./adr/README.md) | ADR | 按条目确定 |
 | 编写或维护文档 | [文档贡献指南](./contributing.md) | How-to | Current |
 

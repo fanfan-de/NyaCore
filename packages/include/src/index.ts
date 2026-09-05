@@ -18,7 +18,7 @@ export type { ConfigSource } from './source.js'
 export type { IncludeOperation } from './planner.js'
 
 export interface IncludeOptions {
-  /** JSON/YAML 文件绝对路径，或相对于宿主 cwd 的路径；后代从文件目录解析。 */
+  /** .json 文件绝对路径，或相对于宿主 cwd 的路径；后代从文件目录解析。 */
   readonly path: string
   /** Loader 中独占的挂载根 ID；声明条目位于这个命名空间下。 */
   readonly id: string

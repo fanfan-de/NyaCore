@@ -69,3 +69,14 @@ HMR 的 TS 支持只覆盖显式登记的入口及其受支持本地依赖。保
 按[入门教程](../tutorials/framework-basics.md)运行组件、服务、资源、恢复与诊断例子，再按[任务日志教程](../tutorials/task-journal.md)验证自己的宿主关闭路径。至少确认：缺依赖不执行业务、更新先清理旧资源、禁用后无新调度、恢复后可继续、最终关闭等待在途资源。
 
 宿主负责信号、启动/关闭期限与退出码；超时不能宣称 Core 已取消初始化或 cleanup。Timer 取消未来调度，但不会等待已开始的异步回调，业务 Effect 必须等待自己的在途任务。开发使用[构建重启流程](./development.md)。迁移测试通过后，再替换实际部署使用的版本和 lockfile。
+
+## 6. 迁移已有 YAML 配置
+
+当前工作树已将 Include 格式收敛为 JSON。这是相对旧候选的显式格式变更，已有 `.yaml` / `.yml` 配置不能直接继续使用。
+
+1. 将根配置和所有被 include 引用的文件内容转换成标准 JSON，使用 `.json` 扩展名。保留 `version`、Entry ID、顺序、配置和禁用状态；仅改扩展名不能转换 YAML 语法。
+2. 更新宿主 `IncludeOptions.path` 和每个 `type: "include"` 条目的 `path`。模块名和组件代码路径保持原有含义。
+3. 将注释说明移到应用文档。JSON 不支持注释和尾随逗号，也不接受 `.jsonc`。
+4. 在独立验证环境刷新声明，检查报告、组件状态和保存后的文件；完成关闭与重新加载验证后，再替换实际配置。多文件保存仍逐个来源执行，不提供跨文件事务。
+
+可参考已迁移的[Include/HMR 示例](../../examples/include-hmr/README.md)。新增能力和完整格式边界见[Include README](../../packages/include/README.md)，决策依据见[ADR-0016](../adr/0016-json-only-configuration.md)。

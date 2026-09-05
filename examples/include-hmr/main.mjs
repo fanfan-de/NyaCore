@@ -34,7 +34,7 @@ try {
   await app.installComponent(ConsoleLogger, { timestamps: false })
   await app.installComponent(Loader)
   await app.installComponent(Include, {
-    id: 'app', path: fileURLToPath(new URL('./config.yml', import.meta.url)),
+    id: 'app', path: fileURLToPath(new URL('./config.json', import.meta.url)),
   })
   await app.installComponent(Hmr, {
     entries: [new URL('./worker.mjs', import.meta.url).href],
@@ -50,7 +50,7 @@ try {
   const report = await app.hmr.start()
   if (!['applied', 'unchanged'].includes(report.status)) await stop(1)
   else if (once) await stop()
-  else console.log('修改 config.yml、jobs.yml 或 message.mjs；Ctrl+C 关闭。退出码 75 表示需要重新启动宿主。')
+  else console.log('修改 config.json、jobs.json 或 message.mjs；Ctrl+C 关闭。退出码 75 表示需要重新启动宿主。')
 } catch (error) {
   console.error(error)
   await stop(1)

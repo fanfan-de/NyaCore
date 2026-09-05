@@ -53,8 +53,5 @@
   "devDependencies": {
     "@nya/core": "0.1.0-rc.1",
     "@nya/loader": "0.1.0-rc.1"
-  },
-  "dependencies": {
-    "yaml": "^2.8.1"
   }
 }

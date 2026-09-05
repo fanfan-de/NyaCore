@@ -2,6 +2,12 @@
 
 本文件记录面向消费者的变化。兼容边界见[兼容承诺](./docs/compatibility.md)，升级步骤见[迁移指南](./docs/how-to/migrate-0.1.md)。
 
+## 未发布
+
+- Include 配置统一为标准 JSON：根文件和全部 include 来源仅接受 `.json`，移除 YAML 解析、注释回写与运行依赖；YAML、JSONC、注释和尾随逗号会被拒绝。
+- 多文件 JSON 挂载、来源查询、保存恢复、冲突检测和 HMR 刷新保持支持；Include/HMR 示例和实际 tarball 消费者统一使用 JSON。
+- 这是相对 `0.1.0-rc.1` 原候选的格式不兼容变更。已有 YAML 内容需转换为 JSON 并更新宿主入口和全部 include 路径，见[迁移步骤](./docs/how-to/migrate-0.1.md#6-迁移已有-yaml-配置)。
+
 ## 0.1.0-rc.1 — 2026-09-05
 
 本地发布候选，尚不代表已发布到 npm。六个公开包采用同一版本，Node.js 最低版本为 22.12.0。

@@ -44,7 +44,7 @@ export declare class DocumentError extends TypeError {
 export declare function jsonData(input: unknown, location?: string, ancestors?: Set<object>): JsonValue;
 export declare function validateDocument(input: unknown, source?: string): IncludeDocument;
 export declare function parseConfig(text: string, filename: string): IncludeDocument;
-export declare function serializeConfig(document: IncludeDocument, filename: string, previous?: string): string;
+export declare function serializeConfig(document: IncludeDocument, filename: string): string;
 
 === lib/index.d.ts ===
 import { Service } from "@nya/core";

@@ -683,7 +683,7 @@ const component = {
 - `fiber.restart()` 使用当前已验证配置重启 ACTIVE Fiber，或重试 FAILED Fiber；初始 Schema 失败时重新校验原始输入，也可以通过合法 `update()` 恢复，缺少依赖时保持 PENDING。
 - DISPOSED Fiber 拒绝更新和重启；根 Fiber 仅支持清空 Effect 树并恢复 ACTIVE 的 `restart()`。
 
-Loader 已在 Core 之外负责把内存配置 Entry 映射为 Fiber。Include 已读取 YAML/JSON 并保存来源文件，通过 Loader 公共操作应用修改；它不提供跨文件事务。
+Loader 已在 Core 之外负责把内存配置 Entry 映射为 Fiber。Include 已读取 JSON 并保存来源文件，通过 Loader 公共操作应用修改；它不提供跨文件事务。
 
 ## 14. 错误处理与日志
 
@@ -785,7 +785,7 @@ packages/core/src/
 
 ```text
 @nya/loader          动态导入模块和管理配置条目树
-@nya/include         读取及写入 YAML/JSON 配置
+@nya/include         读取及写入 JSON 配置
 @nya/group           组织嵌套组件组
 @nya/hmr             文件监听、模块缓存和热替换
 @nya/timer           生命周期安全的 timeout/interval/debounce
@@ -793,9 +793,9 @@ packages/core/src/
 create-nya           项目脚手架
 ```
 
-其中 Loader 内存 Entry 树、内建 Group 与 Resolver、Include JSON/YAML 来源配置、HMR 本地 ESM 版本替换、ConsoleLogger 及 Timer timeout/interval 已经 Current。Timer 的计时器归调用方 Effect；取消不等待在途回调。独立 Group 包、debounce 等高级计时能力、脚手架和 Context mixin 仍是 Proposed。外围包只依赖公开协议；导入不会自动安装组件、监听文件或输出。实际行为以[核心概念](./concepts.md)及各包测试为准。
+其中 Loader 内存 Entry 树、内建 Group 与 Resolver、Include JSON 来源配置、HMR 本地 ESM 版本替换、ConsoleLogger 及 Timer timeout/interval 已经 Current。Timer 的计时器归调用方 Effect；取消不等待在途回调。独立 Group 包、debounce 等高级计时能力、脚手架和 Context mixin 仍是 Proposed。外围包只依赖公开协议；导入不会自动安装组件、监听文件或输出。实际行为以[核心概念](./concepts.md)及各包测试为准。
 
-这种分层保证 Core 不依赖文件系统、YAML、文件监听器或 Node 私有模块加载器。
+这种分层保证 Core 不依赖文件系统、配置解析器、文件监听器或 Node 私有模块加载器。
 
 ### 17.3 代码文件总注释规范
 
