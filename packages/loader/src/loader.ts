@@ -19,6 +19,10 @@ import {
   normalizeLoaderResolution,
 } from './resolver.js'
 import type {
+  DefinitionReplacement,
+  EntryMutationOptions,
+  ReplaceOptions,
+  ReplacementReport,
   EntryInput,
   EntrySnapshot,
   EntryState,
@@ -270,7 +274,10 @@ export class Loader extends Service {
   static readonly provide = 'loader'
 
   private readonly host: Context
-  private readonly resolver: LoaderResolver
+  private componentResolver: LoaderResolver
+  private targetRevision = 0
+  private replacing = false
+  private readonly replacementEntries = new Set<string>()
   private readonly baseUrl?: string
   private readonly records = new Map<string, EntryRecord>()
   private readonly roots: string[] = []
@@ -292,7 +299,7 @@ export class Loader extends Service {
     }
 
     this.host = context
-    this.resolver = config.resolver ?? defaultLoaderResolver
+    this.componentResolver = config.resolver ?? defaultLoaderResolver
     this.baseUrl = config.baseUrl
 
     context.effect(() => {
@@ -318,14 +325,17 @@ export class Loader extends Service {
     input: EntryInput,
     parentId: string | null = null,
     index?: number,
+    options: EntryMutationOptions = {},
   ): Promise<EntrySnapshot> {
     const values = normalizeEntryInput(input)
+    const expectedRevision = this.captureRevision(options)
     if (parentId !== null) validateString(parentId, 'parent entry id')
 
     const caller = this.ctx.fiber
     const reentrant = this.isSelfWaiting(caller)
     const register = () => {
       this.assertOpen()
+      this.assertRevision(expectedRevision)
       this.assertParentAvailable(parentId)
       if (this.records.has(values.id)) {
         throw new Error(`entry "${values.id}" already exists`)
@@ -343,6 +353,7 @@ export class Loader extends Service {
         cleanupBlocked: false,
       }
       this.records.set(record.id, record)
+      this.targetRevision++
       siblings.splice(insertion, 0, record.id)
       return record
     }
@@ -372,12 +383,14 @@ export class Loader extends Service {
   }
 
   /** 更新 Entry；纯配置变更复用 Fiber，空间或安装覆盖变更重新安装子树。 */
-  async update(id: string, update: EntryUpdate): Promise<EntrySnapshot> {
+  async update(id: string, update: EntryUpdate, options: EntryMutationOptions = {}): Promise<EntrySnapshot> {
     this.assertNotSelfWaiting('update')
     validateString(id, 'entry id')
     const captured = captureUpdate(update)
+    const expectedRevision = this.captureRevision(options)
 
     await this.enqueue(async () => {
+      this.assertRevision(expectedRevision)
       const record = this.requireRecord(id)
       const next: EntryValues = {
         id: record.id,
@@ -417,6 +430,7 @@ export class Loader extends Service {
       const disabledChanged = next.disabled !== record.disabled
 
       Object.assign(record, next)
+      this.targetRevision++
       record.installationDirty ||= structural
       if (configChanged && record.type === 'component') record.configDirty = true
       if (record.cleanupBlocked) return
@@ -472,12 +486,15 @@ export class Loader extends Service {
     id: string,
     parentId: string | null,
     index?: number,
+    options: EntryMutationOptions = {},
   ): Promise<EntrySnapshot> {
     this.assertNotSelfWaiting('move')
     validateString(id, 'entry id')
     if (parentId !== null) validateString(parentId, 'parent entry id')
+    const expectedRevision = this.captureRevision(options)
 
     await this.enqueue(async () => {
+      this.assertRevision(expectedRevision)
       const record = this.requireRecord(id)
       if (parentId === id || this.isDescendant(parentId, id)) {
         throw new Error(`cannot move entry "${id}" into its own subtree`)
@@ -496,6 +513,7 @@ export class Loader extends Service {
       const finalSiblings = this.getSiblings(parentId)
       finalSiblings.splice(insertion, 0, id)
       record.parentId = parentId
+      this.targetRevision++
 
       if (previousParent === parentId) return
 
@@ -518,11 +536,13 @@ export class Loader extends Service {
   }
 
   /** 永久移除 Entry 子树；Core 仍负责尽可能完成全部级联清理。 */
-  async remove(id: string): Promise<void> {
+  async remove(id: string, options: EntryMutationOptions = {}): Promise<void> {
     this.assertNotSelfWaiting('remove')
     validateString(id, 'entry id')
+    const expectedRevision = this.captureRevision(options)
 
     const errors = await this.enqueue(async () => {
+      this.assertRevision(expectedRevision)
       const record = this.requireRecord(id)
       const subtree = this.collectSubtree(id)
       // 删除也必须报告尚未通过 resolve 确认的历史清理失败。
@@ -552,6 +572,7 @@ export class Loader extends Service {
           this.records.delete(entryId)
           this.scheduled.delete(entryId)
         }
+        this.targetRevision++
         this.removingRoots.delete(id)
       }
       return uniqueCleanupErrors(failures)
@@ -617,6 +638,103 @@ export class Loader extends Service {
     this.assertNotSelfWaiting('awaitIdle')
     this.assertOpen()
     await this.drain()
+  }
+
+  /** 声明与定义版本；单纯的 Fiber 状态变化不会递增。 */
+  get revision(): number { return this.targetRevision }
+  /** 捕获当前 Resolver，用于外围适配器构造保持原解析行为的包装。 */
+  get resolver(): LoaderResolver { return this.componentResolver }
+  private captureRevision(options: EntryMutationOptions): number | undefined {
+    const revision = options.expectedRevision
+    if (revision !== undefined && (!Number.isSafeInteger(revision) || revision < 0)) throw new TypeError('invalid expectedRevision')
+    return revision
+  }
+  private assertRevision(expected: number | undefined): void {
+    if (expected !== undefined && expected !== this.targetRevision) throw new Error('stale Loader revision: expected ' + expected + ', received ' + this.targetRevision)
+  }
+  /** 读取当前有效解析请求，不调用 Resolver。Group 没有解析请求。 */
+  request(id: string): LoaderResolveRequest | undefined {
+    this.assertOpen()
+    const record = this.requireRecord(id)
+    if (record.type === 'group') return
+    return Object.freeze({ id, name: record.name!, parentId: record.parentId, baseUrl: this.effectiveBaseUrl(record) })
+  }
+
+  /** 先清理整个替换集合，再在同一队列提交定义和 Resolver；不自动解除清理阻断。 */
+  async replace(replacements: readonly DefinitionReplacement[], options: ReplaceOptions): Promise<ReplacementReport> {
+    this.assertNotSelfWaiting('replace')
+    if (!Number.isSafeInteger(options?.expectedRevision) || options.expectedRevision < 0) throw new TypeError('expectedRevision must be a non-negative integer')
+    if (options.resolver !== undefined && typeof options.resolver !== 'function') throw new TypeError('invalid replacement resolver')
+    const revision = options.expectedRevision
+    const resolver = options.resolver
+    const signal = options.signal
+    const seen = new Set<string>()
+    const affected = new Set<string>()
+    const prepared = replacements.map(item => {
+      validateString(item.id, 'replacement id')
+      if (seen.has(item.id)) throw new Error('duplicate replacement id: ' + item.id)
+      seen.add(item.id)
+      affected.add(item.id)
+      return { id: item.id, definition: normalizeLoaderResolution(item.definition) }
+    })
+    const result = await this.enqueue(async () => {
+      let committed = false
+      const errors: unknown[] = []
+      const report = (status: ReplacementReport['status']): ReplacementReport => Object.freeze({
+        revision: this.targetRevision, committed, status, errors: Object.freeze([...errors]),
+        entries: Object.freeze(prepared.flatMap(({ id }) => { const entry = this.get(id); return entry ? [entry] : [] })),
+      })
+      if (signal?.aborted || revision !== this.targetRevision) return report('stale')
+      for (const { id } of prepared) {
+        const record = this.requireRecord(id)
+        if (record.type !== 'component') throw new Error('cannot replace a group definition: ' + id)
+        const blocked = this.collectSubtree(id).map(child => this.requireRecord(child)).find(child => child.cleanupBlocked)
+        if (blocked) {
+          errors.push(blocked.error)
+          return report('failed')
+        }
+      }
+      const roots = prepared.filter(({ id }) => !prepared.some(other => other.id !== id && this.isDescendant(id, other.id)))
+      for (const { id } of roots) for (const child of this.collectSubtree(id)) {
+        this.replacementEntries.add(child)
+        affected.add(child)
+      }
+      this.replacing = true
+      try {
+        for (const { id } of roots) {
+          const cleanup = await this.disposeRecordFiber(this.requireRecord(id))
+          if (!cleanup.ok) { errors.push(cleanup.error); return report('failed') }
+        }
+        // 用户清理期间允许 create() 登记声明；此时旧构建已经过期。
+        if (signal?.aborted || revision !== this.targetRevision) return report('stale')
+        if (resolver) this.componentResolver = resolver
+        for (const { id, definition } of prepared) {
+          const record = this.requireRecord(id)
+          record.resolution = { request: this.request(id)!, definition }
+          this.clearError(record)
+          record.installationDirty = false
+          record.configDirty = false
+        }
+        this.targetRevision++
+        committed = true
+        for (const { id } of roots) await this.reconcileSubtree(id, true)
+        for (const { id } of prepared) {
+          const record = this.requireRecord(id)
+          if (record.state === 'failed') errors.push(record.error)
+        }
+        return report(errors.length ? 'failed' : 'applied')
+      } finally {
+        this.replacing = false
+        this.replacementEntries.clear()
+        // 清理中断时，尚无 Fiber 的条目保持已声明目标，由后续显式恢复处理。
+      }
+    })
+    await this.drain()
+    const entries = [...affected].flatMap(id => { const entry = this.get(id); return entry ? [entry] : [] })
+    const errors = uniqueCleanupErrors([...result.errors, ...entries.filter(entry => entry.state === 'failed').map(entry => entry.error)])
+    return Object.freeze({ ...result, revision: this.targetRevision,
+      status: result.status === 'applied' && errors.length ? 'failed' : result.status,
+      errors: Object.freeze(errors), entries: Object.freeze(entries) })
   }
 
   private enqueue<Value>(operation: () => Value | PromiseLike<Value>) {
@@ -970,7 +1088,7 @@ export class Loader extends Service {
         })
         if (!record.resolution || !sameResolveRequest(record.resolution.request, request)) {
           record.resolution = undefined
-          const resolution = await this.resolver(request)
+          const resolution = await this.componentResolver(request)
           if (this.disposed || this.records.get(record.id) !== record) return false
           record.resolution = { request, definition: normalizeLoaderResolution(resolution) }
         }
@@ -1088,7 +1206,7 @@ export class Loader extends Service {
         record.state = parent.disabled ? 'disabled' : 'pending'
         record.blockedBy = parent.blockedBy
       }
-      this.schedule(entryId)
+      if (!this.replacing || !this.replacementEntries.has(entryId)) this.schedule(entryId)
       return
     }
 
@@ -1116,8 +1234,8 @@ export class Loader extends Service {
         || event.fiber.state === FiberState.DISPOSED
       )
     ) {
-      if (event.fiber.state === FiberState.FAILED) this.schedule(entryId)
-      for (const child of record.children) this.schedule(child)
+      if (event.fiber.state === FiberState.FAILED && (!this.replacing || !this.replacementEntries.has(entryId))) this.schedule(entryId)
+      for (const child of record.children) if (!this.replacing || !this.replacementEntries.has(child)) this.schedule(child)
     }
   }
 

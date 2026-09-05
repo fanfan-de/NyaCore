@@ -6,6 +6,10 @@ export {
 } from './loader.js'
 export { defaultLoaderResolver } from './resolver.js'
 export type {
+  EntryMutationOptions,
+  DefinitionReplacement,
+  ReplaceOptions,
+  ReplacementReport,
   Awaitable,
   ComponentEntryInput,
   EntryInput,

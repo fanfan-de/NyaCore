@@ -2,7 +2,13 @@
 
 `@nya/loader` 是 Nya 的通用内存组件加载层。它把稳定的 Entry 树映射为 `@nya/core` Fiber，并负责模块解析、配置更新、父子所有权、禁用恢复、移动和失败重试。
 
-它不读取或写入配置文件，也不监听文件变化。YAML / JSON、持久化、HMR 和宿主特定的模块注册表应建立在这层 API 之上。
+它不读取或写入配置文件，也不监听文件变化。[Include](../include/README.md) 的 YAML/JSON 持久化与[HMR](../hmr/README.md) 已建立在这层公开 API 之上。
+
+## 外围控制器的版本检查
+
+`revision` 跟踪声明与定义提交；`create/update/move/remove` 的最后一个可选参数接受 `expectedRevision`，在队列执行时拒绝过期操作。`request(id)` 只返回有效解析请求，`resolver` 用于捕获已有解析策略。
+
+`replace(replacements, { expectedRevision, resolver?, signal? })` 接收已经准备好的定义，先清理整个集合并合并重叠子树，再共同提交成功定义缓存和未来 Resolver。它保留声明身份、原始配置与禁用状态，报告 `committed` 和实际状态。清理失败阻断提交；启动失败可能发生在提交之后；中途取消或版本过期不承诺撤销已经完成的清理。普通 `resolve()` 的缓存和恢复语义保持不变。
 
 ## 安装
 

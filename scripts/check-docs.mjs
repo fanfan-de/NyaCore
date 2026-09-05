@@ -123,6 +123,9 @@ const requiredFiles = [
   path.join(root, 'examples/task-journal/README.md'),
   path.join(root, 'packages/timer/README.md'),
   path.join(root, 'packages/loader/README.md'),
+  path.join(root, 'packages/include/README.md'),
+  path.join(root, 'packages/hmr/README.md'),
+  path.join(root, 'examples/include-hmr/README.md'),
 ]
 const files = [...requiredFiles, ...await collectMarkdown(path.join(root, 'docs'))]
 

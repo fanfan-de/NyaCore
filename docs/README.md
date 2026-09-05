@@ -12,6 +12,7 @@
 | 查看候选版本变化 | [版本记录](../CHANGELOG.md) | Reference | Current |
 | 独立安装并嵌入一个完整应用 | [任务日志应用教程](./tutorials/task-journal.md) | Tutorial | Current |
 | 排查等待、使用 Timer 与构建重启 | [开发操作指南](./how-to/development.md) | How-to | Current |
+| 使用配置文件和同进程热替换 | [Include/HMR 示例](../examples/include-hmr/README.md) | How-to | Current |
 | 快速理解当前架构 | [架构总览](./architecture.md) | Explanation | Current |
 | 理解当前运行时 | [核心概念](./concepts.md) | Explanation | Current |
 | 理解 Loader Entry 树 | [ADR-0009](./adr/0009-loader-entry-tree.md) | ADR | Accepted |
@@ -21,6 +22,10 @@
 | 了解候选交付与宿主模块解析 | [ADR-0013](./adr/0013-release-contract.md) | ADR | Proposed |
 | 理解 Logger 与诊断边界 | [ADR-0005](./adr/0005-runtime-observability.md) | ADR | Accepted |
 | 了解目标架构 | [核心设计](./design.md) | Specification | Proposed |
+| 规划通用配置与持久化 | [配置持久化实施计划](./config-persistence-plan.md) | Specification | Proposed |
+| 评审配置文件与运行状态的边界 | [ADR-0014](./adr/0014-config-persistence-boundary.md) | ADR | Proposed |
+| 规划 Include、配置监听与代码热替换 | [Include 与 HMR 实施计划](./include-hmr-plan.md) | Specification | Proposed |
+| 评审模块版本和公开替换边界 | [ADR-0015](./adr/0015-module-generations-and-replacement.md) | ADR | Proposed |
 | 查看技术决策 | [架构决策记录](./adr/README.md) | ADR | 按条目确定 |
 | 编写或维护文档 | [文档贡献指南](./contributing.md) | How-to | Current |
 
@@ -34,7 +39,7 @@
 
 判断当前版本实际做什么时，按以下证据核对：
 
-1. `packages/core/src/`、`packages/loader/src/`、`packages/logger-console/src/` 与 `packages/timer/src/` 中的实现和导出类型；示例应用行为同时核对 `examples/task-journal/src/` 和开发宿主脚本；
+1. `packages/core/src/`、`packages/loader/src/`、`packages/include/src/`、`packages/hmr/src/`、`packages/logger-console/src/` 与 `packages/timer/src/` 中的实现和导出类型；示例应用行为同时核对 `examples/` 中的源码和宿主脚本；
 2. 相应包及示例测试中可重复运行的行为测试；
 3. `docs/concepts.md` 中对上述行为的解释。
 

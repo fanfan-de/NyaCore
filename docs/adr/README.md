@@ -28,6 +28,8 @@ Accepted ADR 不应通过改写历史来适配新结论。需要改变决策时�
 | [0011](./0011-application-host-lifecycle.md) | 应用组合与宿主进程生命周期 | Proposed |
 | [0012](./0012-development-lifecycle-boundaries.md) | 依赖诊断与开发辅助的生命周期边界 | Proposed |
 | [0013](./0013-release-contract.md) | 发布契约与宿主模块解析 | Proposed |
+| [0014](./0014-config-persistence-boundary.md) | 配置文档通过外围适配器持久化并协调 Loader | Proposed |
+| [0015](./0015-module-generations-and-replacement.md) | 通过版本化模块产物和公开替换协议实现 HMR | Proposed |
 
 ## 新建 ADR
 

@@ -91,7 +91,7 @@ try {
 
 ## 运行一个独立应用
 
-需要完整候选包与文档时，在仓库根目录运行 `npm run release:check`，通过后执行 `npm run release:pack`，复制生成的 `artifacts/release-candidate/`。其中 `vendor/` 提供四个包，`SHA256SUMS` / `RELEASE.json` 记录身份与摘要，`task-journal/` 是下述完整应用。
+需要完整候选包与文档时，在仓库根目录运行 `npm run release:check`，通过后执行 `npm run release:pack`，复制生成的 `artifacts/release-candidate/`。其中 `vendor/` 提供六个包，`SHA256SUMS` / `RELEASE.json` 记录身份与摘要，`task-journal/` 是下述完整应用，`include-hmr/` 提供配置与同进程热替换示例。
 
 [任务日志应用教程](./docs/tutorials/task-journal.md)演示文件存储服务、定时任务、配置更新、组件启停和依赖恢复，并展示如何把相同应用嵌入现有宿主。在仓库根目录生成独立目录后，可以整体复制到仓库外运行：
 
@@ -247,10 +247,13 @@ console.log(worker.state) // active
 NyaCore/
 ├── packages/core/       # @nya/core 源码、构建配置与测试
 ├── packages/loader/     # @nya/loader 内存 Entry 树与模块解析
+├── packages/include/    # JSON/YAML 来源配置、预览与保存
+├── packages/hmr/        # 配置监听与同进程 ESM 代码替换
 ├── packages/logger-console/ # 可选的 @nya/logger-console 输出组件
 ├── packages/timer/      # 调用方 Effect 管理的 timeout / interval
 ├── playground/          # 可运行示例与手动验证场景
 ├── examples/task-journal/ # 可独立打包或嵌入的任务日志应用
+├── examples/include-hmr/ # 文件配置和 HMR 开发宿主
 ├── docs/                # 架构、概念、设计和 ADR
 ├── scripts/             # 仓库级检查脚本
 └── package.json         # npm workspaces 与统一命令入口
@@ -265,14 +268,15 @@ npm run check
 
 | 命令 | 说明 |
 | --- | --- |
-| `npm run build` | 构建四个 Nya 包和任务日志示例应用 |
+| `npm run build` | 构建六个 Nya 包和任务日志示例应用 |
 | `npm test` | 运行发布包、任务日志示例与开发宿主的测试 |
 | `npm run typecheck` | 检查发布包、测试、Playground 与任务日志示例的类型 |
 | `npm run docs:check` | 检查 Markdown 结构、代码围栏和本地链接 |
 | `npm run check` | 依次运行文档、类型和测试检查 |
-| `npm run package:check` | 构建、打包并以外部消费者方式验证四个发布包 |
+| `npm run package:check` | 构建、打包并以外部消费者方式验证六个发布包 |
 | `npm run release:check` | 运行完整仓库检查和 npm 包发布前验证 |
-| `npm run release:pack` | 构建本地候选目录，附带四包、摘要、教程与独立应用，不发布 npm |
+| `npm run release:pack` | 构建本地候选目录，附带六包、摘要、教程与独立应用，不发布 npm |
+| `npm run dev:include-hmr` | 运行 JSON/YAML 配置与同进程代码替换示例 |
 | `npm run api:check` / `api:update` | 比对构建后声明基线；有意变更经过兼容审查后再更新 |
 | `npm run playground` | 构建 Core 并运行全部示例场景 |
 | `npm run example:pack` | 构建 Nya 包并生成可搬移的 `artifacts/task-journal/` 应用目录 |
@@ -299,7 +303,9 @@ npm run check
 
 ## 当前边界
 
-callable Service、mixin、文件配置持久化和 HMR 仍属于目标设计，尚不能作为已实现能力使用。当前 Loader 只保存内存 Entry 树，不读取 YAML / JSON，也不监听文件；任务日志示例的 JSON 配置由应用宿主读取。异步 Standard Schema 校验同样不在当前版本支持范围内。运行时诊断不会自动发现绕过 Core 所有权协议创建的宿主资源，也不会以超时自动中断 cleanup。
+[`@nya/include`](./packages/include/README.md) 已提供 JSON/YAML 多文件声明、预览、保存与恢复；[`@nya/hmr`](./packages/hmr/README.md) 提供可选配置监听和本地 ESM/TS 同进程热替换。可用 `npm run dev:include-hmr` 运行[专用示例](./examples/include-hmr/README.md)。Loader 继续只管理内存 Entry，两个新包通过其公开操作协调。
+
+callable Service、mixin 和异步 Standard Schema 校验仍未实现。HMR 不覆盖任意 Node 加载方式，达到 ESM 版本上限时请求宿主重启。运行时诊断不会自动发现绕过 Core 所有权协议创建的宿主资源，也不会以超时自动中断 cleanup。
 
 ## 许可证
 

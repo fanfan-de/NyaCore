@@ -6,7 +6,7 @@
 
 本文用一组互补视图说明 Nya Core 当前的系统边界、核心构件、运行时关系和必须维持的不变量。它不承担完整 API Reference，也不把[目标设计](./design.md)中尚未实现的能力描述成当前架构。
 
-判断当前行为时，以 `packages/core/`、`packages/loader/`、`packages/logger-console/` 与 `packages/timer/` 的源码、导出类型和行为测试以及[核心概念指南](./concepts.md)为证据。图中的箭头表达运行时职责或关系，不等同于 TypeScript 文件之间的 import 方向。
+判断当前行为时，以 `packages/` 中六个包的源码、导出类型和行为测试以及[核心概念指南](./concepts.md)为证据。图中的箭头表达运行时职责或关系，不等同于 TypeScript 文件之间的 import 方向。
 
 ## 1. 三十秒理解
 
@@ -37,12 +37,19 @@ flowchart LR
         Host["宿主应用"]
         Core["@nya/core<br/>作用域运行时"]
         Loader["@nya/loader<br/>内存 Entry 树与模块解析"]
+        Include["@nya/include<br/>JSON/YAML 来源与保存"]
+        Hmr["@nya/hmr<br/>监听与 ESM 版本图"]
         ConsoleLogger["@nya/logger-console<br/>可选控制台 sink"]
         Timer["@nya/timer<br/>调用方所有的 timeout / interval"]
         Components["应用组件<br/>函数、class 或带 apply 的对象"]
 
         Host -->|"创建 Root Context<br/>安装或卸载组件"| Core
         Host -->|"创建、更新、移动 Entry"| Loader
+        Host -->|"显式刷新 / 启动"| Include
+        Host -->|"显式启动 / 关闭"| Hmr
+        Hmr -->|"刷新声明"| Include
+        Include -->|"预览、保存、树操作"| Loader
+        Hmr -->|"版本检查与定义替换"| Loader
         Loader -->|"只使用公开安装、Fiber<br/>与 Registry 观察协议"| Core
         Core -->|"派生 Context<br/>驱动启动、停止与重启"| Components
         Components -->|"声明 Inject、提供 Service<br/>登记 Effect 与 Event"| Core
@@ -65,7 +72,7 @@ flowchart LR
 - Core 只观察通过其公开所有权协议登记的资源，不枚举宿主进程中的任意句柄，也不为 cleanup 设置统一超时；
 - Context 是进程内作用域协议，不是权限、安全或进程沙箱。
 
-Loader、配置文件、HMR、控制台输出、定时器封装和分布式生命周期不属于 `@nya/core`。内存 Entry 加载已经由独立的 `@nya/loader` Service 提供，控制台输出由 `@nya/logger-console` Component 提供，timeout/interval 由 `@nya/timer` Service 提供；配置文件持久化、HMR 和分布式生命周期仍未实现。
+Loader、配置文件、HMR、控制台输出、定时器封装和分布式生命周期不属于 `@nya/core`。内存 Entry 加载由 `@nya/loader` Service 提供，控制台输出由 `@nya/logger-console` Component 提供，timeout/interval 由 `@nya/timer` Service 提供；`@nya/include` 管理文件声明，`@nya/hmr` 通过 Loader 公开替换协议更新代码。分布式生命周期仍未实现。
 
 Timer 显式安装后提供 `ctx.timer`，每次调用通过 Service facade 把计时器 Effect 登记到调用方 Fiber 或其当前嵌套 Effect。取消只停止后续调度，不等待在途回调；原生 interval 允许异步回调重叠，回调失败会停止后续调度并记录原错误。当前没有 Context mixin、debounce 等高级计时能力。边界由[Timer 实现](../packages/timer/src/index.ts)和[所有权及取消测试](../packages/timer/tests/timer.spec.ts)证明。
 
@@ -417,8 +424,8 @@ flowchart LR
 
 | 领域 | 当前架构 | 仍属目标设计 |
 | --- | --- | --- |
-| Component | 函数、class、对象定义；每次安装独立 Context 与 Fiber；Loader Resolver 与稳定 Entry 树 | HMR 与模块缓存失效 |
-| Config | 同步 Standard Schema 校验与转换；`fiber.config`、`update()`、`restart()`；Loader 内存原始配置更新 | 配置文件持久化与 HMR |
+| Component | 函数、class、对象定义；每次安装独立 Context 与 Fiber；Loader Entry 树；外围 HMR 本地 ESM 版本替换 | 任意模块形式热替换与业务状态迁移 |
+| Config | 同步 Schema 与配置生命周期；Loader 原始配置；外围 Include JSON/YAML 持久化和来源监听 | 跨文件事务与多进程并发写入 |
 | Service | `(服务名, 隔离标签)` 严格寻址；Inject 快照按地址驱动消费者启停；调用方 Context Proxy、intercept 配置、`init`、`check` 与配置合并协议 | callable Service、`extend` 与 mixin |
 | Effect | CleanupSource、失败回滚、幂等 LIFO 清理、聚合错误和结构化诊断树 | 更丰富的宿主资源探针 |
 | Event | 生命周期绑定、Context 过滤和五种派发模式；Service `thisArg` 按调用方隔离地址过滤 | 更完整的业务级事件调试工具 |

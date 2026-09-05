@@ -1,0 +1,6 @@
+# 主配置：每个子文件拥有自己的 ID 空间。
+version: 1
+entries:
+  - id: jobs
+    type: include
+    path: ./jobs.yml

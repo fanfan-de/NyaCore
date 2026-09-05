@@ -19,24 +19,28 @@ Comments and implementation-private members are omitted; constructor visibility 
 === lib/index.d.ts ===
 export { Loader, LoaderGroup, } from "./loader.js";
 export { defaultLoaderResolver } from "./resolver.js";
-export type { Awaitable, ComponentEntryInput, EntryInput, EntrySnapshot, EntryState, EntryType, EntryUpdate, GroupEntryInput, LoaderConfig, LoaderResolution, LoaderResolveRequest, LoaderResolver, } from "./types.js";
+export type { EntryMutationOptions, DefinitionReplacement, ReplaceOptions, ReplacementReport, Awaitable, ComponentEntryInput, EntryInput, EntrySnapshot, EntryState, EntryType, EntryUpdate, GroupEntryInput, LoaderConfig, LoaderResolution, LoaderResolveRequest, LoaderResolver, } from "./types.js";
 
 === lib/loader.d.ts ===
 import { Service } from "@nya/core";
 import type { Component, Context } from "@nya/core";
-import type { EntryInput, EntrySnapshot, EntryUpdate, LoaderConfig } from "./types.js";
+import type { DefinitionReplacement, EntryMutationOptions, ReplaceOptions, ReplacementReport, EntryInput, EntrySnapshot, EntryUpdate, LoaderConfig, LoaderResolveRequest, LoaderResolver } from "./types.js";
 export declare const LoaderGroup: Component.Object<unknown>;
 export declare class Loader extends Service {
     static readonly provide = "loader";
     constructor(context: Context, config?: LoaderConfig);
-    create(input: EntryInput, parentId?: string | null, index?: number): Promise<EntrySnapshot>;
-    update(id: string, update: EntryUpdate): Promise<EntrySnapshot>;
-    move(id: string, parentId: string | null, index?: number): Promise<EntrySnapshot>;
-    remove(id: string): Promise<void>;
+    create(input: EntryInput, parentId?: string | null, index?: number, options?: EntryMutationOptions): Promise<EntrySnapshot>;
+    update(id: string, update: EntryUpdate, options?: EntryMutationOptions): Promise<EntrySnapshot>;
+    move(id: string, parentId: string | null, index?: number, options?: EntryMutationOptions): Promise<EntrySnapshot>;
+    remove(id: string, options?: EntryMutationOptions): Promise<void>;
     resolve(id: string): Promise<EntrySnapshot>;
     get(id: string): EntrySnapshot | undefined;
     entries(): readonly EntrySnapshot[];
     awaitIdle(): Promise<void>;
+    get revision(): number;
+    get resolver(): LoaderResolver;
+    request(id: string): LoaderResolveRequest | undefined;
+    replace(replacements: readonly DefinitionReplacement[], options: ReplaceOptions): Promise<ReplacementReport>;
 }
 declare module "@nya/core" {
     interface Context {
@@ -114,5 +118,24 @@ export type LoaderResolver = (request: LoaderResolveRequest) => Awaitable<Loader
 export interface LoaderConfig {
     readonly resolver?: LoaderResolver;
     readonly baseUrl?: string;
+}
+export interface DefinitionReplacement {
+    readonly id: string;
+    readonly definition: Component<any>;
+}
+export interface EntryMutationOptions {
+    readonly expectedRevision?: number;
+}
+export interface ReplaceOptions {
+    readonly expectedRevision: number;
+    readonly resolver?: LoaderResolver;
+    readonly signal?: AbortSignal;
+}
+export interface ReplacementReport {
+    readonly revision: number;
+    readonly status: "applied" | "failed" | "stale";
+    readonly committed: boolean;
+    readonly entries: readonly EntrySnapshot[];
+    readonly errors: readonly unknown[];
 }
 export {};

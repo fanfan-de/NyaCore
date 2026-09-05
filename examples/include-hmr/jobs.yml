@@ -1,0 +1,6 @@
+version: 1
+entries:
+  - id: worker
+    name: ./worker.mjs
+    config:
+      message: hello

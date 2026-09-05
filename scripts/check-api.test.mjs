@@ -109,7 +109,7 @@ test('fails clearly when a reachable declaration is missing or leaves published 
 
 test('checking is read-only, explicit update establishes baselines, and public drift fails the guard', async t => {
   const f = await fixture(t)
-  for (const name of ['core', 'loader', 'logger-console', 'timer']) {
+  for (const name of ['core', 'loader', 'include', 'hmr', 'logger-console', 'timer']) {
     await f.write(`packages/${name}/package.json`, manifest(`@nya/${name}`))
     await f.write(`packages/${name}/lib/index.d.ts`, 'export declare function run(): void;')
   }

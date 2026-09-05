@@ -104,3 +104,28 @@ export interface LoaderConfig {
   /** 没有 Entry / 祖先覆盖时的宿主基址，默认 Resolver 用它解析相对文件与裸包名。 */
   readonly baseUrl?: string
 }
+
+/** 一组已准备好的定义；文件和构建协议留在调用方。 */
+export interface DefinitionReplacement {
+  readonly id: string
+  readonly definition: Component<any>
+}
+/** 外围控制器可在队列执行时拒绝已经过期的声明操作。 */
+export interface EntryMutationOptions {
+  readonly expectedRevision?: number
+}
+export interface ReplaceOptions {
+  /** 构建前捕获的声明版本，防止覆盖之后的创建、配置或结构修改。 */
+  readonly expectedRevision: number
+  /** 与定义缓存在同一队列提交，供之后的新建和重新安装使用。 */
+  readonly resolver?: LoaderResolver
+  /** 提交前取消候选；已进入的用户清理仍等待完成。 */
+  readonly signal?: AbortSignal
+}
+export interface ReplacementReport {
+  readonly revision: number
+  readonly status: 'applied' | 'failed' | 'stale'
+  readonly committed: boolean
+  readonly entries: readonly EntrySnapshot[]
+  readonly errors: readonly unknown[]
+}

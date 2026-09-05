@@ -13,6 +13,7 @@ import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { checkExample } from './check-example.mjs'
 import { checkResolverConsumer } from './check-resolver-consumer.mjs'
+import { checkIncludeHmrConsumer } from './check-include-hmr-consumer.mjs'
 import { createReleaseBundle } from './pack-release.mjs'
 import { createHash } from 'node:crypto'
 
@@ -29,6 +30,8 @@ const packageSpecifications = [
     directory: 'packages/loader',
     name: '@nya/loader',
   },
+  { directory: 'packages/include', name: '@nya/include' },
+  { directory: 'packages/hmr', name: '@nya/hmr' },
   {
     directory: 'packages/logger-console',
     name: '@nya/logger-console',
@@ -93,6 +96,10 @@ try {
       assert(packageJson.peerDependencies?.['@nya/core'] === '^0.1.0-rc.1',
         `${specification.name} must require the supported Core series`)
     }
+    if (['@nya/include', '@nya/hmr'].includes(specification.name)) {
+      assert(packageJson.peerDependencies?.['@nya/loader'] === '^0.1.0-rc.1',
+        specification.name + ' must require the supported Loader series')
+    }
 
     const packed = JSON.parse(runNpm([
       'pack',
@@ -154,6 +161,8 @@ import { Context, FiberState, type Fiber, type LogRecord } from '@nya/core'
 import { Loader, type EntrySnapshot, type LoaderResolver } from '@nya/loader'
 import { ConsoleLogger, type ConsoleLoggerOptions } from '@nya/logger-console'
 import { Timer, type TimerCallback } from '@nya/timer'
+import { Include, type IncludeDocument } from '@nya/include'
+import { Hmr, type HmrReport } from '@nya/hmr'
 
 const context = new Context()
 const fiber: Fiber = context.installComponent(() => undefined)
@@ -176,6 +185,12 @@ void fiber
 void record
 void loader
 void entry
+const document: IncludeDocument = { version: 1, entries: [] }
+const report: HmrReport | undefined = context.hmr?.report()
+void document
+void report
+void Include
+void Hmr
 `)
 
   const tarballs = packageResults.map(result => {
@@ -260,8 +275,8 @@ void entry
       name: specification.name, tarball: tarballs[index],
     })))
   const release = JSON.parse(readFileSync(join(releaseDirectory, 'RELEASE.json'), 'utf8'))
-  assert(release.version === '0.1.0-rc.1' && release.packages.length === 4,
-    'candidate manifest must identify all four RC packages')
+  assert(release.version === '0.1.0-rc.1' && release.packages.length === packageSpecifications.length,
+    'candidate manifest must identify all RC packages')
   for (const entry of release.packages) {
     const digest = createHash('sha256').update(readFileSync(join(releaseDirectory, entry.path))).digest('hex')
     assert(digest === entry.sha256, `candidate digest does not match ${entry.name}`)
@@ -275,6 +290,7 @@ void entry
     name: specification.name,
     tarball: tarballs[index],
   })), runNpm)
+  checkIncludeHmrConsumer(temporaryRoot, consumerRoot, releaseDirectory, runNpm)
 
   const summary = packageResults.map(result => {
     return `${result.filename}（${result.entryCount} 个文件）`

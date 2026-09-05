@@ -9,7 +9,7 @@
 
 `0.1.0-rc.1` 以包根 exports 和发布声明表达公开边界，包内协调方法通过 `@internal` 从声明隐藏。Context 创建 Root、安装组件和管理作用域；不直接调用 Fiber 内部工厂或启动协议。Registry 等现有低层公开类型仍保留，详情见[兼容承诺](./compatibility.md)。`fiber.refreshDependencies()` 是保留的高级接口：重新捕获依赖后调用 `await fiber.awaitStable()`；单纯读取诊断或 `restart()` 不重新执行 `Service.check`。
 
-本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Core 的 Service、Inject、严格服务隔离、调用方 Context 追踪、Context intercept、单次安装覆盖、Registry 生命周期观察、Event、同步配置生命周期、Logger 和 Effect 诊断已经可用；外围包已经提供内存 Loader 与控制台 Logger。callable Service、mixin、文件配置持久化和 HMR 等能力仍属于后续设计目标，详见[核心设计](./design.md)。
+本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Core 的 Service、Inject、严格服务隔离、调用方 Context 追踪、Context intercept、单次安装覆盖、Registry 生命周期观察、Event、同步配置生命周期、Logger 和 Effect 诊断已经可用；外围包提供 Loader、Include 文件配置、HMR、控制台 Logger 和 Timer。callable Service、mixin 等能力仍属于后续设计目标，详见[核心设计](./design.md)。
 
 ## 1. 一句话理解 Nya Core
 
@@ -1105,7 +1105,23 @@ Loader 管理的 Entry 启动或清理期间，该 Component 及其所有权后�
 
 `remove()` 遇到清理错误时仍尽可能完成全部清理、删除与后续协调，再通过 Promise 报告错误；尚未显式恢复的旧清理失败也会报告。单项保留原错误，多项独立错误使用 `AggregateError`。恢复不会重新执行已经失败且缓存结果的旧 disposer，该失败仍可能在 Core 父级最终清理时再次报告。
 
-首版 Loader 不读取或写入 YAML / JSON，不监听文件，也不做模块 HMR 缓存失效。文件适配器、管理界面和 HMR 应建立在这组 Entry 操作之上，而不是访问 Core 私有状态。完整边界见 [ADR-0009](./adr/0009-loader-entry-tree.md)、[ADR-0010](./adr/0010-runtime-reliability.md) 与 [`@nya/loader` README](../packages/loader/README.md)。
+Loader 不读取或写入 YAML / JSON，也不监听文件。它额外公开 `revision`、有效解析请求和 `replace()`，让外围控制器提交一组已经准备好的组件定义。创建、更新、移动和删除支持可选的预期版本；检查发生在队列实际执行时。普通 Fiber 状态传播不改变声明版本，`resolve()` 仍只用于显式恢复。
+
+`replace()` 拒绝过期或已取消的候选；先清理受影响的所有权子树，合并祖先/后代重叠，再共同提交定义缓存和供后续安装使用的 Resolver。清理失败不会自动解除阻断，报告区分定义是否已经提交与实际运行是否失败。保留 Entry ID 不代表复用 Fiber。证据见[替换测试](../packages/loader/tests/loader-replacement.spec.ts)和[Loader README](../packages/loader/README.md)。
+
+### 16.1 Include 与 HMR 如何协作
+
+Include 把版本化的 JSON/YAML 声明编译为一棵 Loader 挂载子树。文件内 ID 与 include 挂载链共同决定稳定身份，普通分组移动不改变 ID。每个来源保留原始文档和内容摘要，`source(id)` 可定位其文件；动态条目没有配置来源。文件只保存原始 JSON 数据，不保存已转换配置、Fiber ID 或错误。
+
+预览只检查文档和树操作，不导入组件或运行组件 Schema。保存先验证全部来源并写回一个文件，再协调运行，因此“已保存”和“已运行”必须分开判断。外部摘要冲突或无效文件不会修改运行；保存后的启动错误保留最新目标并报告部分应用。来源文件共享和包含循环会被拒绝。YAML 节点按稳定 ID 更新以尽量保留注释。
+
+Include 每步按最新树重新规划，并用 Loader 版本保护排队的变更；部分应用的目标保留，下一次刷新重新协调。卸载时只清理独占挂载，磁盘声明保留。当前行为由[Include 测试](../packages/include/tests/include.spec.ts)和[源码](../packages/include/src/index.ts)支撑。
+
+HMR 的配置模式监听来源目录并调用 Include 刷新。代码模式为显式登记的本地 ESM/TS 入口建立依赖图，用 TypeScript 5.9.3 输出保留模块边界的版本目录。共享本地模块连接的入口一起替换；裸包在原始宿主位置解析，从而与宿主共享 Core。原始 `import.meta.url` 资源路径得以保留。无关代码分支不重启，服务消费者仍按 Core 协议传播。
+
+候选构建和导入完成前不清理旧运行。导入顶层副作用无法回滚；组件资源应有 Effect 所有者。回退上一代定义也是新的清理和安装，不恢复业务内存。关闭立即撤销监听和未提交候选，已经进入的用户操作需要等待收尾。版本文件归 Root 生命周期：等待 Root 清理稳定后异步删除，Root 的 dispose 不等待磁盘回收，失败记日志。这保留了 cleanup 中延迟导入模块的能力。ESM 历史缓存由进程退出释放，默认导入 100 代后请求宿主重启。
+
+支持边界见[HMR README](../packages/hmr/README.md)，依据是[同进程与竞态测试](../packages/hmr/tests/hmr.spec.ts)及[原生 tarball 消费者](../scripts/check-include-hmr-consumer.mjs)。文件控制器本身不结束宿主进程。
 
 ## 17. 当前实现与后续设计的边界
 
@@ -1141,7 +1157,9 @@ Loader 管理的 Entry 启动或清理期间，该 Component 及其所有权后�
 | `@nya/timer` timeout / interval | 已实现，定时器归调用方 Effect，清理不等待在途回调 |
 | `@nya/loader` 内存 Entry 树、Group 与 Resolver | 已实现为独立外围包 |
 | 示例应用构建与进程重启 | 已实现于示例开发宿主，不改变 Core 清理语义 |
-| 文件配置持久化、HMR 和其他外围生态 | 尚未实现 |
+| `@nya/include` JSON/YAML 配置与多文件持久化 | 已实现，先保存声明再协调运行，冲突和部分应用分别报告 |
+| `@nya/hmr` 配置监听与本地代码替换 | 已实现，显式入口、版本化 ESM 图、局部替换与宿主重启请求 |
+| callable/mixin 以外的其他外围生态 | 按各包实际实现确定 |
 
 阅读源码或撰写示例时，应以这条边界为准。设计文档描述的是预期终态；本文描述的是当前可以依赖的基础心智模型。
 

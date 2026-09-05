@@ -54,6 +54,10 @@ await app.fiber.dispose()
 
 ## 4. 检查就绪与失败恢复
 
+需要通用文件配置时，另安装同批 Include/HMR tarball，按[专用示例](../../examples/include-hmr/README.md)先安装 Loader / Include / HMR，再调用 `hmr.start()`。不启用 HMR 时调用 `include.refresh()`。已有程序化 Loader 用法不需要迁移；新增树操作版本参数均为可选，`replace()` 是独立接口。
+
+HMR 的 TS 支持只覆盖显式登记的入口及其受支持本地依赖。保存通过 Include 提交完整来源文档；检查 `saved` 与实际 Entry 状态，不能把“写入成功”当作“启动成功”。代码回退不会修改配置文件。
+
 不要把 `await fiber`、`awaitStable()` 或 `loader.awaitIdle()` 的完成当成应用就绪。需要运行的 Fiber 必须是 `ACTIVE`，Entry 必须是 `active`。Entry 为 `failed` 时读取 `error`，即使错误值为 `undefined`；为 `pending` 时查询 `blockedBy`、依赖原因与提供者状态。
 
 清理失败会持续保留目标与错误，更新或移动目标不会自动重建。确认允许继续运行后，调用 `loader.resolve(id)`；目标禁用则转为 `disabled`，目标启用则按最新目标恢复。它不重试旧 cleanup，旧资源是否需要人工修复由资源协议决定。`remove()` 拒绝也可能已经完整删除了 Entry，应重新 `get(id)` 确认。

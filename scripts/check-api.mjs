@@ -7,7 +7,7 @@ import process from 'node:process'
 import ts from 'typescript'
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const packageNames = ['core', 'loader', 'logger-console', 'timer']
+const packageNames = ['core', 'loader', 'include', 'hmr', 'logger-console', 'timer']
 const declarationPattern = /\.d\.[cm]?ts$/
 
 function portable(path) {
