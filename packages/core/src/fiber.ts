@@ -1,11 +1,11 @@
 /** 本文件实现可由动态服务依赖反复激活的组件 Fiber，并管理每轮运行的 Effect。 */
 
 import type { Context } from './context.js'
-import { DisposableStack, EffectScope } from './disposable.js'
+import { DisposableStack, EffectScope, once } from './disposable.js'
 import type { CleanupSource, Disposer } from './disposable.js'
 import type { Component, ResolvedInject } from './component.js'
 import type { ComponentRuntimeInternal } from './registry.js'
-import type { DependencySnapshot, ServiceAddress } from './service.js'
+import type { DependencyCheckObservation, DependencySnapshot, ServiceAddress } from './service.js'
 import {
   fiberBeforeUnload,
   fiberDisposeFromOwner,
@@ -15,6 +15,7 @@ import {
   registryNotifyFiberState,
   serviceCapture,
   serviceInit,
+  serviceInspectDependencies,
   serviceSubscribe,
 } from './symbols.js'
 import { resolveConfig } from './config.js'
@@ -136,6 +137,9 @@ export class Fiber implements PromiseLike<void> {
 
   /** 服务注册表最近计算出的目标快照；undefined 表示至少缺少一个依赖。 */
   #desiredSnapshot: DependencySnapshot | undefined
+
+  /** 仅保存最近一次捕获中实际执行的 check 结果，不持有实现或 Provider。 */
+  #dependencyChecks = new Map<string, DependencyCheckObservation>()
 
   /** 组件入口和清理代码当前固定使用的快照。 */
   #activeSnapshot: DependencySnapshot | undefined
@@ -267,6 +271,7 @@ export class Fiber implements PromiseLike<void> {
       this.context,
       this,
       this.inject,
+      this.#runtime?.callback,
     )
     try {
       this.#config = resolveConfig(this.#runtime?.Config, this.#configInput)
@@ -291,10 +296,13 @@ export class Fiber implements PromiseLike<void> {
       return
     }
 
+    const checks = new Map<string, DependencyCheckObservation>()
     this.#desiredSnapshot = this.context.root.services[serviceCapture](
       this.context,
       this.inject,
+      checks,
     )
+    this.#dependencyChecks = checks
     this.#scheduleReconcile()
   }
 
@@ -380,10 +388,7 @@ export class Fiber implements PromiseLike<void> {
       { phase: 'start', effectPath: diagnostic.path },
     )
 
-    let disposeTask: Promise<void> | undefined
-    const dispose: Disposer = () => {
-      if (disposeTask) return disposeTask
-
+    const dispose = once(() => {
       const preserveFailure = diagnostic.state === 'setup-failed'
         || diagnostic.state === 'cleanup-failed'
       if (!preserveFailure) {
@@ -397,7 +402,7 @@ export class Fiber implements PromiseLike<void> {
         )
       }
 
-      disposeTask = Promise.resolve(scope.dispose()).then(
+      return Promise.resolve(scope.dispose()).then(
         () => {
           if (!preserveFailure) {
             diagnostic.setState('disposed')
@@ -433,15 +438,9 @@ export class Fiber implements PromiseLike<void> {
           throw error
         },
       )
-      void disposeTask.catch(() => {})
-      return disposeTask
-    }
+    })
 
-    if (owner) {
-      owner.add(dispose)
-    } else {
-      effects.add(dispose)
-    }
+    const registered = owner ? owner.add(dispose) : effects.add(dispose)
 
     // 启动阶段的数组会跨 await 保持存在，因此异步入口在 await 后创建的
     // 顶层 Effect 也会被纳入本轮启动稳定性判断。
@@ -518,12 +517,17 @@ export class Fiber implements PromiseLike<void> {
       },
     )
 
-    return dispose
+    return registered
   }
 
   /** 返回与运行时断开的冻结快照；修改快照不会反向影响 Fiber。 */
   inspect(): FiberDiagnosticSnapshot {
-    return this.#diagnostics.inspect(this)
+    const dependencies = this.#unsubscribe && !this.#disposeOperation
+      ? this.context.root.services[serviceInspectDependencies](
+        this.context, this.inject, this.#dependencyChecks,
+      )
+      : Object.freeze([])
+    return this.#diagnostics.inspect(this, dependencies)
   }
 
   /** 校验并提交新配置，经内部 waterfall 扩展点后等待运行稳定。 */
@@ -630,6 +634,7 @@ export class Fiber implements PromiseLike<void> {
 
     this.#disposeReason ??= 'dispose'
     this.#desiredSnapshot = undefined
+    this.#dependencyChecks.clear()
     this.#disposeErrors = []
     this.#disposeOperation = this.#enqueue(() => this.#dispose())
     return this.#disposeOperation
@@ -898,10 +903,12 @@ export class Fiber implements PromiseLike<void> {
     const stopReason = this.#disposeReason ?? 'dispose'
     this.#setState(FiberState.UNLOADING, stopReason)
 
+    let cleanupFailed = false
     let cleanupFailure: unknown
     try {
       await this.#unloadRun(stopReason)
     } catch (error) {
+      cleanupFailed = true
       cleanupFailure = error
       if (!this.isRoot) this.#error = error
       this.#recordDisposeError(error)
@@ -915,12 +922,13 @@ export class Fiber implements PromiseLike<void> {
       this.#unsubscribe?.()
       this.#unsubscribe = undefined
       this.#desiredSnapshot = undefined
+      this.#dependencyChecks.clear()
       this.#failedTarget = undefined
 
       if (this.isRoot) {
         // 根 Fiber 的 dispose 只清空整棵资源树，根 Context 之后仍可复用。
         this.#runEffects = new DisposableStack()
-        if (!cleanupFailure) this.#diagnostics.clearRun()
+        if (!cleanupFailed) this.#diagnostics.clearRun()
         this.#beforeUnload = new Set()
         this.#disposeOperation = undefined
         this.#disposeReason = undefined
@@ -931,7 +939,7 @@ export class Fiber implements PromiseLike<void> {
       }
     }
 
-    if (cleanupFailure !== undefined && !this.isRoot) {
+    if (cleanupFailed && !this.isRoot) {
       this.#recordFailure('cleanup', cleanupFailure, stopReason)
       this.#diagnostics.clearRun()
     }

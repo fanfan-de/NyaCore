@@ -96,6 +96,7 @@ const levelWeights: Readonly<Record<LogLevel, number>> = {
 interface Subscriber {
   readonly sink: LogSink
   readonly minLevel: LogLevel
+  readonly onFailure: () => void
   active: boolean
 }
 
@@ -162,6 +163,7 @@ class LoggerHub {
     context: Context,
     sink: LogSink,
     options: LogSubscribeOptions,
+    onFailure: () => void,
   ): Disposer {
     if (typeof sink !== 'function') {
       throw new TypeError('invalid log sink: expected a function')
@@ -171,7 +173,7 @@ class LoggerHub {
       throw new TypeError(`invalid log level: ${String(minLevel)}`)
     }
 
-    const subscriber: Subscriber = { sink, minLevel, active: true }
+    const subscriber: Subscriber = { sink, minLevel, onFailure, active: true }
     this.#subscribers.add(subscriber)
 
     if (options.replay) {
@@ -211,15 +213,19 @@ class LoggerHub {
     if (!subscriber.active) return
     subscriber.active = false
     this.#subscribers.delete(subscriber)
-    this.publish(
-      context,
-      '<logger>',
-      'error',
-      'logger/sink-failed',
-      'log sink failed and was removed',
-      { error, phase: 'active' },
-      false,
-    )
+    try {
+      this.publish(
+        context,
+        '<logger>',
+        'error',
+        'logger/sink-failed',
+        'log sink failed and was removed',
+        { error, phase: 'active' },
+        false,
+      )
+    } finally {
+      subscriber.onFailure()
+    }
   }
 }
 
@@ -300,14 +306,23 @@ class ContextLogger implements Logger {
       type: 'logger-subscriber',
       label: `ctx.logger.subscribe(${JSON.stringify(this.name)})`,
     }
-    return withEffectDescriptor(
+    let disposeEffect: Disposer | undefined
+    const onFailure = () => {
+      // replay 可能在 effect() 返回前失败；手动清理的日志也可能重入这里。
+      // 先由 Hub 同步停用 sink，再等当前调用完成后释放所属 Effect。
+      void Promise.resolve().then(() => disposeEffect?.()).catch(() => {
+        // 自动清理是观察旁路；原 disposer 仍向主动等待者保留清理错误。
+      })
+    }
+    disposeEffect = withEffectDescriptor(
       this.context.fiber,
       descriptor,
       () => this.context.fiber.effect(
-        () => getHub(this.context).subscribe(this.context, sink, options),
+        () => getHub(this.context).subscribe(this.context, sink, options, onFailure),
         descriptor.label,
       ),
     )
+    return disposeEffect
   }
 
   #log(level: LogLevel, message: string, data?: unknown) {

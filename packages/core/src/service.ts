@@ -4,9 +4,13 @@ import type { Context } from './context.js'
 import type { Disposer } from './disposable.js'
 import type { Fiber } from './fiber.js'
 import { FiberState } from './fiber.js'
-import type { ResolvedInject } from './component.js'
+import type { Component, ResolvedInject } from './component.js'
 import { withEffectDescriptor } from './diagnostics.js'
-import type { EffectDescriptor } from './diagnostics.js'
+import type {
+  DependencyDiagnosticSnapshot,
+  DependencyProviderDiagnosticSnapshot,
+  EffectDescriptor,
+} from './diagnostics.js'
 import type { IsolationLabel } from './symbols.js'
 import {
   contextFilter,
@@ -20,6 +24,7 @@ import {
   serviceContextFilter,
   serviceConfig,
   serviceInit,
+  serviceInspectDependencies,
   serviceMergeConfig,
   serviceResolveConfig,
   serviceSubscribe,
@@ -46,6 +51,15 @@ export interface DependencySnapshot {
   readonly epoch: string
   readonly services: ReadonlyMap<string, ServiceImplementation>
 }
+
+/** 一次既有捕获执行过的 check；只保存实现编号与结果，供诊断旁路读取。 */
+export type DependencyCheckObservation = {
+  readonly implementationId: number
+} & (
+  | { readonly result: 'passed' }
+  | { readonly result: 'false' }
+  | { readonly result: 'threw'; readonly error: unknown }
+)
 
 /** 一个服务名的全部当前状态；名称在首次使用后始终映射到同一个 slot。 */
 interface ServiceSlot {
@@ -278,6 +292,41 @@ export class ServiceRegistry {
   #defaultLabels = new Map<string, IsolationLabel>()
   #slots = new Map<string, Map<IsolationLabel, ServiceSlot>>()
   #owned = new Map<Fiber, Set<ServiceSlot>>()
+  #declared = new Map<string, Map<IsolationLabel, Set<Fiber>>>()
+
+  /** 只识别 Service 子类的静态数据声明，不执行 getter 或普通组件入口。 */
+  #subscribeDeclaration(context: Context, fiber: Fiber, callback?: Component.Callback<any>) {
+    if (typeof callback !== 'function') return
+    let name: unknown
+    try {
+      const prototype = Reflect.getOwnPropertyDescriptor(callback, 'prototype')?.value
+      if (!prototype || !Object.prototype.isPrototypeOf.call(Service.prototype, prototype)) return
+      let constructor: object | null = callback
+      while (constructor && constructor !== Function.prototype) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(constructor, 'provide')
+        if (descriptor) {
+          if ('value' in descriptor) name = descriptor.value
+          break
+        }
+        constructor = Reflect.getPrototypeOf(constructor)
+      }
+    } catch {
+      // 诊断元数据无法读取时视为未声明，不能改变组件安装结果。
+      return
+    }
+    if (typeof name !== 'string' || name.length === 0) return
+    const address = this.#resolveAddress(context, name)
+    let labels = this.#declared.get(name)
+    if (!labels) this.#declared.set(name, labels = new Map())
+    let providers = labels.get(address.label)
+    if (!providers) labels.set(address.label, providers = new Set())
+    providers.add(fiber)
+    return () => {
+      providers.delete(fiber)
+      if (providers.size === 0) labels.delete(address.label)
+      if (labels.size === 0) this.#declared.delete(address.name)
+    }
+  }
 
   /** 把一个 Context 中的服务名解析为 Root 内唯一的严格地址。 */
   #resolveAddress(context: Context, name: string): ServiceAddress {
@@ -698,6 +747,7 @@ export class ServiceRegistry {
   [serviceCapture](
     context: Context,
     inject: ResolvedInject,
+    checks?: Map<string, DependencyCheckObservation>,
   ): DependencySnapshot | undefined {
     const services = new Map<string, ServiceImplementation>()
 
@@ -710,8 +760,13 @@ export class ServiceRegistry {
 
       if (implementation.check) {
         try {
-          if (!implementation.check.call(implementation.value)) return
-        } catch {
+          if (!implementation.check.call(implementation.value)) {
+            checks?.set(name, { implementationId: implementation.id, result: 'false' })
+            return
+          }
+          checks?.set(name, { implementationId: implementation.id, result: 'passed' })
+        } catch (error) {
+          checks?.set(name, { implementationId: implementation.id, result: 'threw', error })
           return
         }
       }
@@ -727,11 +782,67 @@ export class ServiceRegistry {
     }
   }
 
+  /** 不创建 slot、不运行 check；把当前身份和本次捕获结果组合成冻结值快照。 */
+  [serviceInspectDependencies](
+    context: Context,
+    inject: ResolvedInject,
+    checks: ReadonlyMap<string, DependencyCheckObservation>,
+  ): readonly DependencyDiagnosticSnapshot[] {
+    const dependencies: DependencyDiagnosticSnapshot[] = []
+    for (const name of inject) {
+      const label = context[contextIsolations][name] ?? this.#defaultLabels.get(name)
+      const implementation = label === undefined
+        ? undefined
+        : this.#slots.get(name)?.get(label)?.implementation
+      const providers: DependencyProviderDiagnosticSnapshot[] = []
+      if (implementation) {
+        providers.push(Object.freeze({
+          fiberId: implementation.owner.id,
+          componentName: implementation.owner.name,
+          state: implementation.owner.state,
+          source: 'provided',
+          implementationId: implementation.id,
+        }))
+      }
+      const declared = label === undefined ? undefined : this.#declared.get(name)?.get(label)
+      for (const provider of declared ?? []) {
+        if (provider === implementation?.owner) continue
+        providers.push(Object.freeze({
+          fiberId: provider.id, componentName: provider.name, state: provider.state, source: 'declared',
+        }))
+      }
+      const base = { serviceName: name, providers: Object.freeze(providers) }
+      if (!implementation) {
+        const inactive = providers.length > 0 && providers.every(provider => provider.state !== FiberState.ACTIVE)
+        dependencies.push(Object.freeze({ ...base, status: 'blocked', reason: inactive ? 'provider-inactive' : 'missing' }))
+      } else if (implementation.owner.state !== FiberState.ACTIVE) {
+        dependencies.push(Object.freeze({ ...base, status: 'blocked', reason: 'provider-inactive' }))
+      } else if (!this.#isImplementationAvailable(implementation)) {
+        dependencies.push(Object.freeze({ ...base, status: 'blocked', reason: 'implementation-unavailable' }))
+      } else if (!implementation.check) {
+        dependencies.push(Object.freeze({ ...base, status: 'ready' }))
+      } else {
+        const observed = checks.get(name)
+        if (!observed || observed.implementationId !== implementation.id) {
+          dependencies.push(Object.freeze({ ...base, status: 'unchecked' }))
+        } else if (observed.result === 'passed') {
+          dependencies.push(Object.freeze({ ...base, status: 'ready' }))
+        } else if (observed.result === 'false') {
+          dependencies.push(Object.freeze({ ...base, status: 'blocked', reason: 'check-false' }))
+        } else {
+          dependencies.push(Object.freeze({ ...base, status: 'blocked', reason: 'check-threw', error: observed.error }))
+        }
+      }
+    }
+    return Object.freeze(dependencies)
+  }
+
   /** 把 Fiber 加入所有依赖 slot 的反向索引，永久卸载时由返回函数取消。 */
   [serviceSubscribe](
     context: Context,
     fiber: Fiber,
     inject: ResolvedInject,
+    callback?: Component.Callback<any>,
   ): Disposer {
     const subscriptions: ServiceSlot[] = []
 
@@ -741,6 +852,7 @@ export class ServiceRegistry {
       subscriptions.push(slot)
     }
 
+    const unsubscribeDeclaration = this.#subscribeDeclaration(context, fiber, callback)
     let disposed = false
     return () => {
       if (disposed) return
@@ -749,6 +861,7 @@ export class ServiceRegistry {
       for (const slot of subscriptions) {
         slot.consumers.delete(fiber)
       }
+      unsubscribeDeclaration?.()
     }
   }
 

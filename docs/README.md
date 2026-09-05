@@ -6,15 +6,20 @@
 
 | 需求 | 文档 | 类型 | 状态 |
 | --- | --- | --- | --- |
+| 独立安装并嵌入一个完整应用 | [任务日志应用教程](./tutorials/task-journal.md) | Tutorial | Current |
+| 排查等待、使用 Timer 与构建重启 | [开发操作指南](./how-to/development.md) | How-to | Current |
 | 快速理解当前架构 | [架构总览](./architecture.md) | Explanation | Current |
 | 理解当前运行时 | [核心概念](./concepts.md) | Explanation | Current |
 | 理解 Loader Entry 树 | [ADR-0009](./adr/0009-loader-entry-tree.md) | ADR | Accepted |
+| 了解生命周期重入与失败恢复决策 | [ADR-0010](./adr/0010-runtime-reliability.md) | ADR | Proposed |
+| 了解应用与宿主进程的职责边界 | [ADR-0011](./adr/0011-application-host-lifecycle.md) | ADR | Proposed |
+| 了解依赖诊断与开发辅助的边界 | [ADR-0012](./adr/0012-development-lifecycle-boundaries.md) | ADR | Proposed |
 | 理解 Logger 与诊断边界 | [ADR-0005](./adr/0005-runtime-observability.md) | ADR | Accepted |
 | 了解目标架构 | [核心设计](./design.md) | Specification | Proposed |
 | 查看技术决策 | [架构决策记录](./adr/README.md) | ADR | 按条目确定 |
 | 编写或维护文档 | [文档贡献指南](./contributing.md) | How-to | Current |
 
-随着项目增长，可以增加 `tutorials/`、`how-to/`、`reference/` 和 `explanation/` 目录；在出现实际内容前不创建空目录。
+`tutorials/` 保存可完成的学习流程，`how-to/` 保存具体开发操作。随着项目增长，可以增加 `reference/` 和 `explanation/` 目录；在出现实际内容前不创建空目录。
 
 ## 文档权威规则
 
@@ -24,8 +29,8 @@
 
 判断当前版本实际做什么时，按以下证据核对：
 
-1. `packages/core/src/`、`packages/loader/src/` 与 `packages/logger-console/src/` 中的实现和导出类型；
-2. 相应包测试中可重复运行的行为测试；
+1. `packages/core/src/`、`packages/loader/src/`、`packages/logger-console/src/` 与 `packages/timer/src/` 中的实现和导出类型；示例应用行为同时核对 `examples/task-journal/src/` 和开发宿主脚本；
+2. 相应包及示例测试中可重复运行的行为测试；
 3. `docs/concepts.md` 中对上述行为的解释。
 
 如果概念文档与源码或测试不一致，应把它视为文档漂移并修正；如果测试与声明的公共契约不一致，应先明确这是实现缺陷还是契约变更。
@@ -68,3 +73,4 @@
 - 当前文档体系的建立原因记录在 [ADR-0001](./adr/0001-repository-documentation.md)。
 - Logger 不影响生命周期、1000 条缓冲、诊断保留范围和 console 包边界记录在 [ADR-0005](./adr/0005-runtime-observability.md)。
 - 稳定 Entry、Group、Resolver 和 Loader 到 Fiber 的映射记录在 [ADR-0009](./adr/0009-loader-entry-tree.md)。
+- 应用组合、配置与进程宿主的职责提案记录在 [ADR-0011](./adr/0011-application-host-lifecycle.md)。

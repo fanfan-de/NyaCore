@@ -126,6 +126,32 @@ export interface FiberFailureDiagnosticSnapshot {
   readonly effects: readonly EffectDiagnosticSnapshot[]
 }
 
+/** 已知提供方的值快照；静态声明并不承诺该 Fiber 已经执行 provide()。 */
+export interface DependencyProviderDiagnosticSnapshot {
+  readonly fiberId: number
+  readonly componentName: string
+  readonly state: FiberState
+  readonly source: 'provided' | 'declared'
+  readonly implementationId?: number
+}
+
+export type DependencyDiagnosticReason =
+  | 'missing'
+  | 'provider-inactive'
+  | 'implementation-unavailable'
+  | 'check-false'
+  | 'check-threw'
+
+/** 只读依赖观察；unchecked 表示既有短路解析尚未调用该实现的 check。 */
+export interface DependencyDiagnosticSnapshot {
+  readonly serviceName: string
+  readonly status: 'ready' | 'blocked' | 'unchecked'
+  readonly reason?: DependencyDiagnosticReason
+  readonly providers: readonly DependencyProviderDiagnosticSnapshot[]
+  /** 仅 check-threw 时存在；保留抛出的原值，包括 undefined。 */
+  readonly error?: unknown
+}
+
 export interface FiberDiagnosticSnapshot {
   readonly id: number
   readonly fiberId: number
@@ -136,6 +162,7 @@ export interface FiberDiagnosticSnapshot {
   readonly stateSince: string
   readonly effects: readonly EffectDiagnosticSnapshot[]
   readonly children: readonly FiberDiagnosticSnapshot[]
+  readonly dependencies: readonly DependencyDiagnosticSnapshot[]
   readonly lastFailure?: FiberFailureDiagnosticSnapshot
 }
 
@@ -460,7 +487,10 @@ export class FiberDiagnostics {
     return this.#lastFailure?.effectPaths ?? freezeArray([])
   }
 
-  inspect(owner: DiagnosticFiberOwner): FiberDiagnosticSnapshot {
+  inspect(
+    owner: DiagnosticFiberOwner,
+    dependencies: readonly DependencyDiagnosticSnapshot[],
+  ): FiberDiagnosticSnapshot {
     const childIds = new Set<number>()
     const children: FiberDiagnosticSnapshot[] = []
     const visit = (nodes: readonly EffectNode[]) => {
@@ -487,6 +517,7 @@ export class FiberDiagnostics {
       stateSince: owner.stateSince,
       effects: this.#snapshotEffects(true),
       children: freezeArray(children),
+      dependencies,
       lastFailure: this.#lastFailure,
     })
   }

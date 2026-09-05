@@ -441,7 +441,7 @@ const stop = context.logger.subscribe(
 )
 ```
 
-订阅本身是当前调用方 Fiber 的 `logger-subscriber` Effect；卸载、回滚或手动调用 `stop()` 都会将其移除。sink 第一次抛错后也会自动移除，错误只以 `logger/sink-failed` 写入缓冲且不会再次派发。无论用户日志还是 sink 失败，都不会改变 Fiber 状态、替换组件错误或延迟生命周期。
+订阅本身是当前调用方 Fiber 的 `logger-subscriber` Effect；卸载、回滚或手动调用 `stop()` 都会将其移除。sink 第一次同步抛错或异步拒绝后立即停止接收日志，并在微任务中自动清理所属 Effect；成功清理后，订阅节点与所有者栈中的闭包都会释放。该行为也适用于历史回放期间的失败。错误只以一次 `logger/sink-failed` 写入缓冲且不会再次派发。无论用户日志还是 sink 失败，都不会改变 Fiber 状态、替换组件错误或延迟生命周期。
 
 ## 6. Fiber：单次安装的生命周期控制器
 
@@ -707,6 +707,8 @@ DisposableStack 使用后进先出顺序：
 - 启动失败且回滚也失败时，`AggregateError` 同时保留启动错误与清理错误。
 
 因此，`dispose()` 的 Promise 可能拒绝，但这不表示后续资源没有被尝试清理。
+
+清理任务在进入用户 cleanup 或派发清理日志之前就已缓存；重复调用和同步重入复用同一任务。DisposableStack 在第一条 cleanup 执行前已视为 disposed，不能继续登记资源。成功的主动清理会在返回的 Promise 完成前解除所有者栈的引用；失败项保留到所有者最终清理，以继续传播同一个错误，而不会重复执行 cleanup。cleanup 不应等待自身的清理任务；Core 不为永不结束的用户 Promise 设置强制超时。
 
 ## 9. DisposableStack 与 EffectScope：清理协议的底层构件
 
@@ -974,7 +976,7 @@ try {
 }
 ```
 
-顶层字段是 `fiberId`、`componentName`、`state`、可选 `runId`、`stateSince`、`effects`、`children` 和可选 `lastFailure`；同时保留 `id` / `name` 作为 Fiber ID / 组件名的简写。`lastFailure` 包含失败时的 Fiber/run、发生时间、阶段、可选停止原因、原始 `error`、全部 `effectPaths`、结构化 `failures` 和当时的 Effect 树。嵌套失败按具体叶节点优先归因；若祖先只是在传播同一个错误，不会重复成为汇总路径。
+顶层字段是 `fiberId`、`componentName`、`state`、可选 `runId`、`stateSince`、`effects`、`children`、`dependencies` 和可选 `lastFailure`；同时保留 `id` / `name` 作为 Fiber ID / 组件名的简写。`lastFailure` 包含失败时的 Fiber/run、发生时间、阶段、可选停止原因、原始 `error`、全部 `effectPaths`、结构化 `failures` 和当时的 Effect 树。嵌套失败按具体叶节点优先归因；若祖先只是在传播同一个错误，不会重复成为汇总路径。
 
 Effect 节点提供稳定 ID、类型、标签、状态、创建时间、状态更新时间和子节点。当前结构化类型是：
 
@@ -997,7 +999,15 @@ logger-subscriber
 
 上述旁路语义、保留上限和观测边界记录在 [ADR-0005](./adr/0005-runtime-observability.md) 中。
 
-### 14.3 控制台输出
+### 14.3 依赖等待诊断
+
+`dependencies` 按声明的服务顺序给出每项的观察结果和已知提供者。诊断区分缺少实现、提供者未进入 ACTIVE、实现正在失效、最近一次 `Service.check` 返回假值或抛出错误；检查抛错保留原值，包括 `undefined`。已有解析遇到第一个阻塞就停止，后续尚未执行的检查显示 `unchecked`，不会为诊断额外运行用户代码。
+
+提供者身份、名称和状态来自当前同一隔离地址中的实现；已安装 Service 子类的静态 `provide` 声明也能表明已知但尚未就绪的提供者。`source: 'declared'` 只表示声明，不等于服务已经存在；普通组件首次执行 `provide()` 前无法推断其服务名。声明随 Fiber 安装释放，对外快照不暴露 Provider 实例或 Context，也不保存已销毁 Fiber 的历史强引用。
+
+这些字段是当前服务目标的观察，不替代 Fiber 状态或当前运行固定使用的服务快照。`inspect()` 不调用 `Service.check`，不会使 PENDING 自动恢复；需要再次查询才能得到之后的变化。具体排查步骤见[开发操作指南](./how-to/development.md)。
+
+### 14.4 控制台输出
 
 Core 不直接决定格式或调用 `globalThis.console`。需要默认控制台适配时，显式安装独立包的 Component：
 
@@ -1066,6 +1076,8 @@ const worker = await app.loader.create({
 
 Entry ID 是配置控制面的稳定身份，`fiberId` 是当前一次安装身份。移动、禁用恢复或安装覆盖变化会产生新 Fiber，但 Entry ID 保持不变。`get()` 和 `entries()` 只返回冻结快照，不把内部可变树或 Fiber 对象交给调用方。
 
+Entry 的 `dependencies` 投影当前 Fiber 的依赖诊断。尚无 Fiber 时该数组为空；若条目在等待父 Entry，继续通过 `blockedBy` 查询父条目，不能把空数组当成已就绪。Loader 不额外执行检查或保存独立的诊断缓存。
+
 Component Entry 通过可替换 Resolver 获得 Component；默认 Resolver 使用动态 `import()`，并只接受直接 Component 或 ESM default Component。Group Entry 不解析模块，只安装内建空 Component 来建立 Context、Fiber 和子树所有权边界。Group 上的 `intercept`、`isolate` 与 `baseUrl` 会通过 Context 或 Entry 祖先关系影响后代；这仍是运行时作用域，不是权限沙箱。
 
 Loader 的可观察状态为：
@@ -1078,9 +1090,17 @@ Loader 的可观察状态为：
 | `active` | 当前 Fiber 已经 ACTIVE |
 | `failed` | 最近的解析、配置或组件生命周期尝试失败 |
 
-纯 `config` 更新复用当前 Fiber 并调用 `fiber.update()`；名称、类型、base URL、父级或安装覆盖变化只重新安装目标子树；同一父级内调整顺序不会重启。Component 启动或清理期间可以等待 `loader.create()` 声明新 Entry；若把当前仍在 LOADING 的 Entry 作为父级，新条目先保持 `pending`，父级 ACTIVE 后自动安装，而不会与 Loader 队列互相等待。解析或启动失败保存在目标 Entry 快照中，不阻止兄弟条目，`resolve(id)` 用于显式重试。`disabled` 会卸载但保留子树，`remove()` 会删除整棵 Entry 子树；Loader 自身卸载时，所有实例继续由 Core Effect 所有权级联清理。
+纯 `config` 更新复用当前 Fiber 并调用 `fiber.update()`；名称、类型、base URL、父级或安装覆盖变化只重新安装目标子树；同一父级内调整顺序不会重启。Component 的成功解析缓存以 Resolver 的完整请求（`id`、`name`、`parentId`、有效 `baseUrl`）为依据。移动或祖先基址变化后重新比较请求，变化时重新解析；显式基址覆盖仍阻断祖先基址继承。配置或安装覆盖变化在解析请求不变时复用定义，Group 不经过 Resolver。
 
-首版 Loader 不读取或写入 YAML / JSON，不监听文件，也不做模块缓存失效。文件适配器、管理界面和 HMR 应建立在这组 Entry 操作之上，而不是访问 Core 私有状态。完整边界见 [ADR-0009](./adr/0009-loader-entry-tree.md) 与 [`@nya/loader` README](../packages/loader/README.md)。
+Loader 管理的 Entry 启动或清理期间，该 Component 及其所有权后代可以等待 `loader.create()` 声明新 Entry；该规则也覆盖外部服务失效，以及 Loader 等待期间其他分支的生命周期调用。该重入路径只校验并登记条目，返回 `pending` 或适用的 `disabled` 快照，再由后续队列解析和安装；返回不表示新组件已经启动。`update()`、`move()`、`remove()`、`resolve()` 和 `awaitIdle()` 在同类自等待调用中立即拒绝，调用方应从生命周期之外发起这些操作。普通 ACTIVE Root 的并发操作继续正常排队。
+
+`disabled` 会卸载但保留子树，`remove()` 会删除整棵 Entry 子树。删除开始后，向目标子树中新建 Entry 会在修改树之前拒绝；向其他分支或根创建仍允许。删除完成后，`get()` 和 `entries()` 均不再包含被删除的条目，ID 可以复用。Loader 自身卸载时，所有实例继续由 Core Effect 所有权级联清理。
+
+解析、配置或启动失败保存在目标 Entry 快照中，不阻止无关兄弟条目，`resolve(id)` 用于显式重试。清理失败（包括启动回滚中的清理失败）另有持续阻断：Entry 保留目标配置、位置与原错误，并保持 `failed`，Registry 通知、后续自动协调或修改目标均不会清除该失败。即使目标已设为 `disabled: true`，也优先显示 `failed`。`resolve()` 只解除指定 Entry 的阻断，各自清理失败的后代需分别恢复。禁用目标恢复为 `disabled` 而不启动；启用目标复用尚有效的 Fiber，或在旧 Fiber 已销毁、安装目标已改变时按最新目标重新安装。
+
+`remove()` 遇到清理错误时仍尽可能完成全部清理、删除与后续协调，再通过 Promise 报告错误；尚未显式恢复的旧清理失败也会报告。单项保留原错误，多项独立错误使用 `AggregateError`。恢复不会重新执行已经失败且缓存结果的旧 disposer，该失败仍可能在 Core 父级最终清理时再次报告。
+
+首版 Loader 不读取或写入 YAML / JSON，不监听文件，也不做模块 HMR 缓存失效。文件适配器、管理界面和 HMR 应建立在这组 Entry 操作之上，而不是访问 Core 私有状态。完整边界见 [ADR-0009](./adr/0009-loader-entry-tree.md)、[ADR-0010](./adr/0010-runtime-reliability.md) 与 [`@nya/loader` README](../packages/loader/README.md)。
 
 ## 17. 当前实现与后续设计的边界
 
@@ -1112,7 +1132,10 @@ Loader 的可观察状态为：
 | callable Service 与 mixin | 尚未实现 |
 | Logger、结构化生命周期日志与 Effect 树诊断 | 已实现 |
 | `@nya/logger-console` | 已实现为显式安装的外围组件 |
+| 依赖阻塞服务、提供者状态与检查结果诊断 | 已实现，Fiber 与 Loader Entry 均可读取 |
+| `@nya/timer` timeout / interval | 已实现，定时器归调用方 Effect，清理不等待在途回调 |
 | `@nya/loader` 内存 Entry 树、Group 与 Resolver | 已实现为独立外围包 |
+| 示例应用构建与进程重启 | 已实现于示例开发宿主，不改变 Core 清理语义 |
 | 文件配置持久化、HMR 和其他外围生态 | 尚未实现 |
 
 阅读源码或撰写示例时，应以这条边界为准。设计文档描述的是预期终态；本文描述的是当前可以依赖的基础心智模型。

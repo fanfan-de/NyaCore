@@ -48,6 +48,8 @@ try {
 
 `fiber.inspect()` 返回冻结的当前 run 与最近失败 run 快照，包括已登记 Effect 的类型、状态和失败路径。Logger、sink 和诊断读取都不会改变生命周期 Promise、原错误身份或清理顺序。
 
+组件等待依赖时，可查看 `fiber.inspect().dependencies`：它列出必需服务的阻塞原因与已知提供方身份、状态，并区分已注册实现和静态声明候选。诊断不会重复执行 `Service.check`；原有短路解析尚未检查的后续依赖标为 `unchecked`，抛错结果保留原值。
+
 诊断只覆盖通过 Nya Effect、事件、Service、Logger 订阅或组件安装协议登记的资源；未登记的宿主资源无法自动发现，Core 也不会为 cleanup 设置统一超时。需要控制台输出时，可显式安装独立的 `@nya/logger-console` Component；导入 `@nya/core` 本身不会打印日志。
 
 完整说明、当前能力边界和贡献指南见 [NyaCore 仓库](https://github.com/fanfan-de/NyaCore)。

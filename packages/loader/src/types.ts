@@ -2,6 +2,7 @@
 
 import type {
   Component,
+  FiberDiagnosticSnapshot,
   Inject,
   IsolationLabel,
 } from '@nya/core'
@@ -72,6 +73,8 @@ export interface EntrySnapshot {
   readonly error?: unknown
   readonly fiberId?: number
   readonly blockedBy?: string
+  /** 当前 Fiber 的依赖诊断；尚无安装实例时为空，父条目阻塞仍由 blockedBy 表示。 */
+  readonly dependencies: FiberDiagnosticSnapshot['dependencies']
   readonly config?: unknown
   readonly inject?: Inject
   readonly intercept?: Readonly<Record<string, unknown>>

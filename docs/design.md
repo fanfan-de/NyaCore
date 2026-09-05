@@ -7,7 +7,7 @@
 
 本文记录 Nya 核心运行时的目标设计。状态为 Proposed 表示它可以指导讨论和实现，但不能单独证明某项能力已经存在；当前可观察行为以源码、导出类型、测试和[核心概念指南](./concepts.md)为证据。某段设计被接受后，实现、测试和公开 API 应逐步与其语义一致。
 
-当前已落地 Component、Context、Fiber、Effect、按定义引用区分的 Registry、单次安装覆盖、Service、Inject、严格服务隔离、Service 调用方 Context、Context intercept、Registry 生命周期观察、Event、同步 Config 生命周期、Logger、Effect 诊断，以及独立的内存 `@nya/loader`。本文中的 callable Service、mixin、文件配置持久化和 HMR 仍是 Proposed，不应从目标设计推断它们已经可用。
+当前已落地 Component、Context、Fiber、Effect、按定义引用区分的 Registry、单次安装覆盖、Service、Inject、严格服务隔离、Service 调用方 Context、Context intercept、Registry 生命周期观察、Event、同步 Config 生命周期、Logger、Effect 与依赖等待诊断，以及独立的内存 `@nya/loader`、`@nya/logger-console` 和提供 timeout/interval 的 `@nya/timer`。本文中的 callable Service、mixin、文件配置持久化和 HMR 仍是 Proposed，不应从目标设计推断它们已经可用。
 
 Nya 借鉴 Cordis 的设计思想，但不以逐文件复制 Cordis 为目标。第一阶段追求的是复现它最重要的运行语义：上下文作用域、动态服务依赖、组件生命周期和副作用回收。
 
@@ -713,10 +713,12 @@ Loader 已在 Core 之外负责把内存配置 Entry 映射为 Fiber。后续 In
 ctx.on("record/created")
 ctx.provide("database")
 ctx.installComponent("worker")
-ctx.timeout()
+ctx.timer.timeout()
 ```
 
 `fiber.inspect()` 暴露新建且冻结的只读诊断快照，用于定位资源清理和组件卸载问题。快照包含当前 run、通过安装 Effect 连接的子 Fiber，以及最近一次失败 run；失败信息保留阶段、停止原因、原始错误与 Effect 路径。成功结束的更早历史不保留。
+
+当前的 `dependencies` 还列出必需服务的可用状态、阻塞原因和已知提供方身份。它只读取当前服务元数据与最近一次依赖捕获中实际执行的 `Service.check` 结果；原有短路解析未检查的后续依赖标为 `unchecked`，诊断读取不会再运行 check。静态 `Service.provide` 只作为同一隔离地址中的声明候选，不等同于已注册实现。行为由[依赖诊断测试](../packages/core/tests/dependency-diagnostics.spec.ts)覆盖。
 
 Effect 节点的结构化类型为 `custom`、`component-entry`、`component-install`、`event-listener`、`service-provider` 和 `logger-subscriber`，状态为 `starting`、`active`、`disposing`、`disposed`、`setup-failed` 或 `cleanup-failed`。事件名、服务名和 owner/source Fiber 等身份来自登记时的结构化描述，不能从展示标签反向解析。失败证据按叶节点优先归因，并用 `setup`、`cleanup`、`service-invalidate`、`service-finalize` 区分阶段；同一 Service 的两个卸载阶段可以同时保留。
 
@@ -791,7 +793,7 @@ packages/core/src/
 create-nya           项目脚手架
 ```
 
-其中 `@nya/loader` 的内存 Entry 树、内建 Group Entry 与动态 import Resolver，以及 `@nya/logger-console` 已经 Current；Include、独立 Group 包、HMR、Timer 和脚手架仍是 Proposed。两个外围包都只依赖 Core 公开协议；Core 导入、Loader 导入和 console 包导入都不会自动安装组件或输出。
+其中 `@nya/loader` 的内存 Entry 树、内建 Group Entry 与动态 import Resolver，`@nya/logger-console`，以及 `@nya/timer` 的 timeout/interval 已经 Current。Timer 显式安装后提供 `ctx.timer`，定时器通过调用方 Context 登记为 Effect；取消会停止后续调度，但不等待在途回调。Include、独立 Group 包、HMR、debounce 等高级计时能力和脚手架仍是 Proposed，Context mixin 也尚未实现。这些外围包都只依赖 Core 公开协议；导入不会自动安装组件、启动定时器或输出。Timer 的当前边界见[实现](../packages/timer/src/index.ts)与[测试](../packages/timer/tests/timer.spec.ts)。
 
 这种分层保证 Core 不依赖文件系统、YAML、文件监听器或 Node 私有模块加载器。
 
@@ -869,9 +871,9 @@ create-nya           项目脚手架
 
 ### 阶段五：外围生态
 
-> 实施状态：部分 Current。`@nya/loader` 与 `@nya/logger-console` 已实现；其余包仍是 Proposed。
+> 实施状态：部分 Current。`@nya/loader`、`@nya/logger-console` 与 `@nya/timer` 的 timeout/interval 已实现；其余外围能力仍是 Proposed。
 
-`@nya/loader` 作为显式安装的 Service 管理内存 Entry 树、Resolver、Group 所有权边界和 Entry 到 Fiber 的映射；纯配置更新复用 Fiber，结构变化只重建目标子树。`@nya/logger-console` 作为显式安装的 Component 订阅 Core Logger，导入没有输出副作用，卸载后停止输出。后续实现 Include、文件持久化、Timer 和 HMR。外围包只能依赖 Core 的公开协议，不得通过修改 Core 私有状态工作。
+`@nya/loader` 作为显式安装的 Service 管理内存 Entry 树、Resolver、Group 所有权边界和 Entry 到 Fiber 的映射；纯配置更新复用 Fiber，结构变化只重建目标子树。`@nya/logger-console` 作为显式安装的 Component 订阅 Core Logger，导入没有输出副作用，卸载后停止输出。`@nya/timer` 作为显式安装的 Service 提供调用方所有的 timeout/interval；原生 interval 允许异步回调重叠，回调失败会停止后续调度并记录错误。Include、文件配置持久化、debounce 等高级计时能力和 HMR 仍待实现。外围包只能依赖 Core 的公开协议，不得通过修改 Core 私有状态工作。
 
 ## 19. 最小测试矩阵
 
@@ -948,11 +950,12 @@ create-nya           项目脚手架
 - Context Logger、结构化生命周期记录、Effect 诊断树和最近失败快照已实现；
 - `@nya/logger-console` 已作为只依赖 Core 公开 API 的外围 Component 实现。
 - `@nya/loader` 已作为只依赖 Core 公开 API 的外围 Service 实现稳定 Entry 树、Resolver、Group、失败重试和串行协调。
+- `@nya/timer` 已通过 Core Service 与 Effect 协议实现调用方所有的 timeout/interval；不包含 Context mixin 或 debounce 等高级计时能力。
 
 当前与本文目标之间的主要差距是：
 
 - callable Service、高级 Service 协议和 mixin；
-- Include、文件持久化、Timer 和 HMR 等外围生态，以及更丰富的 Loader 批量事务与模块缓存协议。
+- Include、文件配置持久化、debounce 等高级计时能力和 HMR 等外围生态，以及更丰富的 Loader 批量事务与模块缓存协议。
 
 因此，后续应当在已有生命周期协调器和可观测性基础上继续完成空间组合与其他外围生态，而不是从阶段一重新开始。
 

@@ -27,6 +27,9 @@ export type {
 } from './events.js'
 export { Fiber, FiberState } from './fiber.js'
 export type {
+  DependencyDiagnosticReason,
+  DependencyDiagnosticSnapshot,
+  DependencyProviderDiagnosticSnapshot,
   EffectDiagnosticSnapshot,
   EffectDiagnosticState,
   EffectDiagnosticType,

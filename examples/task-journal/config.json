@@ -1,0 +1,7 @@
+{
+  "storage": { "file": "./data/tasks.jsonl" },
+  "job": { "intervalMs": 1000, "label": "heartbeat" },
+  "logLevel": "info",
+  "startupTimeoutMs": 10000,
+  "shutdownTimeoutMs": 10000
+}

@@ -24,6 +24,9 @@ Accepted ADR 不应通过改写历史来适配新结论。需要改变决策时�
 | [0007](./0007-component-installation-identity.md) | Component 定义、安装实例与运行轮次使用不同身份 | Accepted |
 | [0008](./0008-lifecycle-observation.md) | Registry 通过不可变快照提供生命周期观察 | Accepted |
 | [0009](./0009-loader-entry-tree.md) | Loader 用稳定 Entry 树协调外围模块生命周期 | Accepted |
+| [0010](./0010-runtime-reliability.md) | 生命周期重入与清理失败恢复 | Proposed |
+| [0011](./0011-application-host-lifecycle.md) | 应用组合与宿主进程生命周期 | Proposed |
+| [0012](./0012-development-lifecycle-boundaries.md) | 依赖诊断与开发辅助的生命周期边界 | Proposed |
 
 ## 新建 ADR
 

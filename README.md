@@ -13,6 +13,7 @@ Nya 是一个面向 TypeScript 的作用域组件运行时。它通过动态服�
 - 每次组件安装都有独立的 Context、Fiber、配置和资源所有权；
 - Effect、事件监听、服务注册和子组件会跟随所属 Fiber 自动清理；
 - 结构化日志和只读 Effect 树会保留失败路径，且不会改变组件原有错误；
+- 依赖诊断显示阻塞服务、已知提供者状态与最近一次就绪检查结果；
 - 同名服务可以通过 Context 隔离在同一棵运行时树中并存；
 - 配置更新、手动重启和异步清理都通过同一个串行生命周期协调。
 
@@ -85,6 +86,21 @@ try {
 ```
 
 `logger.records()` 在每棵 Root 中保留最近 1000 条记录；`fiber.inspect()` 返回当前 run 与最近失败 run 的冻结快照。两者都只旁路观察生命周期，不会替换启动或清理抛出的原错误。
+
+## 运行一个独立应用
+
+[任务日志应用教程](./docs/tutorials/task-journal.md)演示文件存储服务、定时任务、配置更新、组件启停和依赖恢复，并展示如何把相同应用嵌入现有宿主。在仓库根目录生成独立目录后，可以整体复制到仓库外运行：
+
+```bash
+npm run example:pack
+cd artifacts/task-journal
+npm install
+npm run build
+npm run demo
+npm start -- --config ./config.json
+```
+
+该目录通过 `vendor/*.tgz` 安装 Nya 依赖，包含源码、测试、配置与构建输出。demo 正常完成后会自行关闭；持续运行时使用 Ctrl+C 请求清理。具体步骤见[示例 README](./examples/task-journal/README.md)。
 
 ## 核心模型
 
@@ -228,7 +244,9 @@ NyaCore/
 ├── packages/core/       # @nya/core 源码、构建配置与测试
 ├── packages/loader/     # @nya/loader 内存 Entry 树与模块解析
 ├── packages/logger-console/ # 可选的 @nya/logger-console 输出组件
+├── packages/timer/      # 调用方 Effect 管理的 timeout / interval
 ├── playground/          # 可运行示例与手动验证场景
+├── examples/task-journal/ # 可独立打包或嵌入的任务日志应用
 ├── docs/                # 架构、概念、设计和 ADR
 ├── scripts/             # 仓库级检查脚本
 └── package.json         # npm workspaces 与统一命令入口
@@ -243,33 +261,37 @@ npm run check
 
 | 命令 | 说明 |
 | --- | --- |
-| `npm run build` | 构建 `@nya/core`、`@nya/loader` 和 `@nya/logger-console` |
-| `npm test` | 运行三个发布包的 Vitest 测试 |
-| `npm run typecheck` | 检查三个发布包、测试和 Playground 的类型 |
+| `npm run build` | 构建四个 Nya 包和任务日志示例应用 |
+| `npm test` | 运行发布包、任务日志示例与开发宿主的测试 |
+| `npm run typecheck` | 检查发布包、测试、Playground 与任务日志示例的类型 |
 | `npm run docs:check` | 检查 Markdown 结构、代码围栏和本地链接 |
 | `npm run check` | 依次运行文档、类型和测试检查 |
-| `npm run package:check` | 构建、打包并以外部消费者方式验证三个发布包 |
+| `npm run package:check` | 构建、打包并以外部消费者方式验证四个发布包 |
 | `npm run release:check` | 运行完整仓库检查和 npm 包发布前验证 |
 | `npm run playground` | 构建 Core 并运行全部示例场景 |
+| `npm run example:pack` | 构建 Nya 包并生成可搬移的 `artifacts/task-journal/` 应用目录 |
 | `npm run dev:core` | 监听 Core 源码并持续构建 |
 | `npm run dev:playground` | 监听并运行 Playground |
+| `npm run dev:example` | 构建框架包，然后监听示例修改，串行清理、构建与重启 |
 
 代码变更完成前默认运行 `npm run check`；准备发布时运行 `npm run release:check`；只修改 Markdown 时至少运行 `npm run docs:check`。
 
 ## 文档
 
 - [文档地图](./docs/README.md)：文档分类、状态与权威规则；
+- [任务日志应用教程](./docs/tutorials/task-journal.md)：独立安装、动态配置、组件启停与嵌入宿主；
+- [开发操作指南](./docs/how-to/development.md)：排查依赖等待、使用 Timer、构建并重启应用；
 - [架构总览](./docs/architecture.md)：系统边界、运行时视图和关键流程；
 - [核心概念](./docs/concepts.md)：有源码与测试支撑的当前行为；
 - [核心设计](./docs/design.md)：目标版本设计，其中未落地内容不能视为当前能力；
-- [架构决策记录](./docs/adr/README.md)：已经接受的关键技术决策；
+- [架构决策记录](./docs/adr/README.md)：关键技术决策与待评审提案；
 - [文档贡献指南](./docs/contributing.md)：文档类型、维护方式与检查要求。
 
 描述当前行为时，以源码、公共导出类型和测试为直接证据。文档与实现冲突时，请按照[文档权威规则](./docs/README.md#文档权威规则)处理，不要静默选择其中一方。
 
 ## 当前边界
 
-callable Service、mixin、文件配置持久化和 HMR 仍属于目标设计，尚不能作为已实现能力使用。当前 Loader 只保存内存 Entry 树，不读取 YAML / JSON，也不监听文件。异步 Standard Schema 校验同样不在当前版本支持范围内。运行时诊断不会自动发现绕过 Core 所有权协议创建的宿主资源，也不会以超时自动中断 cleanup。
+callable Service、mixin、文件配置持久化和 HMR 仍属于目标设计，尚不能作为已实现能力使用。当前 Loader 只保存内存 Entry 树，不读取 YAML / JSON，也不监听文件；任务日志示例的 JSON 配置由应用宿主读取。异步 Standard Schema 校验同样不在当前版本支持范围内。运行时诊断不会自动发现绕过 Core 所有权协议创建的宿主资源，也不会以超时自动中断 cleanup。
 
 ## 许可证
 

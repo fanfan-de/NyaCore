@@ -76,3 +76,7 @@ Fiber ID 会在移动、禁用恢复和重新安装后改变，无法作为持�
 - [ADR-0007：Component 安装身份](./0007-component-installation-identity.md)
 - [ADR-0008：生命周期观察](./0008-lifecycle-observation.md)
 - `packages/loader/tests/loader.spec.ts`
+
+## 后续决策
+
+[ADR-0010](./0010-runtime-reliability.md) 记录生命周期重入创建的完成语义调整，并补充删除期间创建限制、清理失败恢复和解析请求缓存规则。本文保留原决策背景；稳定 Entry 身份、外围包边界和 Core 所有权协议继续适用。

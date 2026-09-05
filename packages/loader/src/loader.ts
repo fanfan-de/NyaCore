@@ -9,6 +9,7 @@ import type {
   ComponentInstallOptions,
   Context,
   Fiber,
+  FiberFailureDiagnosticSnapshot,
   Inject,
   IsolationLabel,
   RegistryEvent,
@@ -24,6 +25,7 @@ import type {
   EntryType,
   EntryUpdate,
   LoaderConfig,
+  LoaderResolveRequest,
   LoaderResolver,
 } from './types.js'
 
@@ -47,9 +49,17 @@ interface EntryRecord extends EntryValues {
   hasError: boolean
   error?: unknown
   fiber?: Fiber
-  definition?: Component<any>
+  resolution?: {
+    readonly request: LoaderResolveRequest
+    readonly definition: Component<any>
+  }
   configDirty: boolean
+  installationDirty: boolean
+  cleanupBlocked: boolean
+  acknowledgedCleanup?: FiberFailureDiagnosticSnapshot
 }
+
+type CleanupOutcome = { readonly ok: true } | { readonly ok: false; readonly error: unknown }
 
 interface ParentTarget {
   readonly context?: Context
@@ -59,6 +69,39 @@ interface ParentTarget {
 
 const hasOwn = (value: object, property: PropertyKey) => {
   return Object.prototype.hasOwnProperty.call(value, property)
+}
+
+function sameResolveRequest(left: LoaderResolveRequest, right: LoaderResolveRequest) {
+  return left.id === right.id
+    && left.name === right.name
+    && left.parentId === right.parentId
+    && left.baseUrl === right.baseUrl
+}
+
+/** 同一次级联清理可能从祖先和后代报告同一错误；按身份合并，不改写错误本身。 */
+function uniqueCleanupErrors(errors: readonly unknown[]) {
+  const members = new Map<AggregateError, readonly unknown[]>()
+  const includes = (error: unknown, target: unknown, seen = new Set<AggregateError>()): boolean => {
+    if (Object.is(error, target)) return true
+    if (!(error instanceof AggregateError) || seen.has(error)) return false
+    seen.add(error)
+    if (!members.has(error)) {
+      let nested: unknown
+      try { nested = error.errors } catch {}
+      members.set(error, Array.isArray(nested) ? nested : [])
+    }
+    return members.get(error)!.some(nested => includes(nested, target, seen))
+  }
+  const result: unknown[] = []
+  for (const error of errors) {
+    if (result.some(current => includes(current, error))) continue
+    for (let index = result.length - 1; index >= 0; index--) {
+      if (includes(error, result[index])) result.splice(index, 1)
+    }
+    // 只去掉重复收集的报告，不拆解或改写用户/父 Fiber 已产生的聚合错误。
+    result.push(error)
+  }
+  return result
 }
 
 function assertRecord(value: unknown, label: string): asserts value is object {
@@ -234,6 +277,8 @@ export class Loader extends Service {
   private readonly fiberEntries = new Map<number, string>()
   private readonly scheduled = new Set<string>()
   private readonly awaitingFibers = new Map<number, number>()
+  private readonly disposingFibers = new Set<number>()
+  private readonly removingRoots = new Set<string>()
   private operation: Promise<void> = Promise.resolve()
   private disposed = false
 
@@ -259,6 +304,8 @@ export class Loader extends Service {
         unsubscribe()
         this.scheduled.clear()
         this.awaitingFibers.clear()
+        this.disposingFibers.clear()
+        this.removingRoots.clear()
         this.fiberEntries.clear()
         this.records.clear()
         this.roots.length = 0
@@ -276,8 +323,10 @@ export class Loader extends Service {
     if (parentId !== null) validateString(parentId, 'parent entry id')
 
     const caller = this.ctx.fiber
-    const reentrant = this.awaitingFibers.has(caller.id)
-    const operation = async () => {
+    const reentrant = this.isSelfWaiting(caller)
+    const register = () => {
+      this.assertOpen()
+      this.assertParentAvailable(parentId)
       if (this.records.has(values.id)) {
         throw new Error(`entry "${values.id}" already exists`)
       }
@@ -290,19 +339,31 @@ export class Loader extends Service {
         state: values.disabled ? 'disabled' : 'pending',
         hasError: false,
         configDirty: false,
+        installationDirty: false,
+        cleanupBlocked: false,
       }
       this.records.set(record.id, record)
       siblings.splice(insertion, 0, record.id)
-      await this.reconcileSubtree(record.id)
+      return record
     }
-    if (reentrant) await operation()
-    else await this.enqueue(operation)
+    if (reentrant) {
+      const record = register()
+      const parent = this.resolveParent(record)
+      record.state = record.disabled || parent.disabled ? 'disabled' : 'pending'
+      record.blockedBy = record.disabled ? undefined : parent.blockedBy
+      // 生命周期暂停点只登记条目。解析和启动不得反向等待本轮清理或新服务。
+      this.schedule(record.id)
+      return this.snapshot(record)
+    }
+    await this.enqueue(async () => {
+      const record = register()
+      await this.reconcileSubtree(record.id)
+    })
 
-    // Component 启动或清理期间可以声明新的 Entry。若当前 Fiber 正被本轮
-    // Loader 操作等待，嵌套创建直接在暂停点执行，避免队列自等待。
+    // 尚未被 Loader 管理的生命周期调用也不等待全树稳定；普通外部调用
+    // 则等待本轮操作及 Registry 事件产生的后续协调。
     if (
-      !reentrant
-      && caller.state !== FiberState.LOADING
+      caller.state !== FiberState.LOADING
       && caller.state !== FiberState.UNLOADING
     ) {
       await this.drain()
@@ -312,6 +373,7 @@ export class Loader extends Service {
 
   /** 更新 Entry；纯配置变更复用 Fiber，空间或安装覆盖变更重新安装子树。 */
   async update(id: string, update: EntryUpdate): Promise<EntrySnapshot> {
+    this.assertNotSelfWaiting('update')
     validateString(id, 'entry id')
     const captured = captureUpdate(update)
 
@@ -355,13 +417,13 @@ export class Loader extends Service {
       const disabledChanged = next.disabled !== record.disabled
 
       Object.assign(record, next)
-      if (typeChanged || nameChanged || baseUrlChanged) {
-        record.definition = undefined
-      }
+      record.installationDirty ||= structural
+      if (configChanged && record.type === 'component') record.configDirty = true
+      if (record.cleanupBlocked) return
 
       if (record.disabled) {
         await this.disposeRecordFiber(record)
-        record.state = 'disabled'
+        if (!record.cleanupBlocked) record.state = 'disabled'
         record.blockedBy = undefined
         await this.blockChildren(record, record.id, true)
         return
@@ -369,6 +431,10 @@ export class Loader extends Service {
 
       if (structural || disabledChanged) {
         await this.disposeRecordFiber(record)
+        if (record.cleanupBlocked) {
+          await this.blockChildren(record, record.id, false)
+          return
+        }
         record.configDirty = false
         this.clearError(record)
         record.state = 'pending'
@@ -407,6 +473,7 @@ export class Loader extends Service {
     parentId: string | null,
     index?: number,
   ): Promise<EntrySnapshot> {
+    this.assertNotSelfWaiting('move')
     validateString(id, 'entry id')
     if (parentId !== null) validateString(parentId, 'parent entry id')
 
@@ -432,7 +499,13 @@ export class Loader extends Service {
 
       if (previousParent === parentId) return
 
+      record.installationDirty = true
+      if (record.cleanupBlocked) return
       await this.disposeRecordFiber(record)
+      if (record.cleanupBlocked) {
+        await this.blockChildren(record, record.id, record.disabled)
+        return
+      }
       record.configDirty = false
       this.clearError(record)
       record.state = record.disabled ? 'disabled' : 'pending'
@@ -446,45 +519,69 @@ export class Loader extends Service {
 
   /** 永久移除 Entry 子树；Core 仍负责尽可能完成全部级联清理。 */
   async remove(id: string): Promise<void> {
+    this.assertNotSelfWaiting('remove')
     validateString(id, 'entry id')
 
-    await this.enqueue(async () => {
+    const errors = await this.enqueue(async () => {
       const record = this.requireRecord(id)
       const subtree = this.collectSubtree(id)
-      await this.disposeRecordFiber(record)
+      // 删除也必须报告尚未通过 resolve 确认的历史清理失败。
+      const failures = subtree.flatMap(entryId => {
+        const entry = this.requireRecord(entryId)
+        return entry.cleanupBlocked ? [entry.error] : []
+      })
+      this.removingRoots.add(id)
+      try {
+        const cleanup = await this.disposeRecordFiber(record)
+        if (!cleanup.ok) failures.push(cleanup.error)
 
-      // 理论上父 Fiber 已经级联销毁所有后代；这里处理失败或外部竞态后
-      // 仍残留的实例，且每个 Fiber.dispose() 本身保持幂等。
-      for (const childId of subtree.slice(1).reverse()) {
-        const child = this.records.get(childId)
-        if (child?.fiber) await this.disposeRecordFiber(child)
+        // 已 DISPOSED 的后代不重复调用 dispose，避免再取得其缓存的拒绝。
+        for (const childId of subtree.slice(1).reverse()) {
+          const child = this.records.get(childId)
+          if (!child?.fiber || child.fiber.state === FiberState.DISPOSED) continue
+          const cleanup = await this.disposeRecordFiber(child)
+          if (!cleanup.ok) failures.push(cleanup.error)
+        }
+      } finally {
+        const siblings = this.getSiblings(record.parentId)
+        const position = siblings.indexOf(id)
+        if (position >= 0) siblings.splice(position, 1)
+        for (const entryId of subtree) {
+          const current = this.records.get(entryId)
+          if (current?.fiber) this.fiberEntries.delete(current.fiber.id)
+          this.records.delete(entryId)
+          this.scheduled.delete(entryId)
+        }
+        this.removingRoots.delete(id)
       }
-
-      const siblings = this.getSiblings(record.parentId)
-      const position = siblings.indexOf(id)
-      if (position >= 0) siblings.splice(position, 1)
-      for (const entryId of subtree) {
-        const current = this.records.get(entryId)
-        if (current?.fiber) this.fiberEntries.delete(current.fiber.id)
-        this.records.delete(entryId)
-        this.scheduled.delete(entryId)
-      }
+      return uniqueCleanupErrors(failures)
     })
 
     await this.drain()
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors, 'multiple errors while removing entry subtree')
   }
 
   /** 显式重试解析、失败启动或尚未提交成功的配置。 */
   async resolve(id: string): Promise<EntrySnapshot> {
+    this.assertNotSelfWaiting('resolve')
     validateString(id, 'entry id')
 
     await this.enqueue(async () => {
       const record = this.requireRecord(id)
-      if (record.disabled) return
-      if (!record.fiber && record.type === 'component') {
-        record.definition = undefined
+      if (record.cleanupBlocked && record.fiber) {
+        record.acknowledgedCleanup = record.fiber.inspect().lastFailure
       }
+      record.cleanupBlocked = false
       this.clearError(record)
+      if (record.fiber?.state === FiberState.DISPOSED) {
+        this.fiberEntries.delete(record.fiber.id)
+        record.fiber = undefined
+      }
+      if (record.disabled || record.installationDirty) {
+        await this.disposeRecordFiber(record)
+        if (record.cleanupBlocked) return
+      }
       record.state = 'pending'
       await this.reconcileSubtree(id, true)
     })
@@ -517,6 +614,7 @@ export class Loader extends Service {
 
   /** 等待当前以及等待期间由 Registry 观察产生的 Loader 协调任务稳定。 */
   async awaitIdle(): Promise<void> {
+    this.assertNotSelfWaiting('awaitIdle')
     this.assertOpen()
     await this.drain()
   }
@@ -548,6 +646,37 @@ export class Loader extends Service {
     if (this.disposed) throw new Error('loader is disposed')
   }
 
+  private isSelfWaiting(caller: Fiber) {
+    for (let current: Fiber | null = caller; current; current = current.parent) {
+      if (this.awaitingFibers.has(current.id)) return true
+      // 外部依赖失效或 Fiber.restart() 也能进入 Entry 生命周期，此时
+      // Loader 尚未等待任何 Fiber；排入 awaitIdle 等操作仍会反向等待自己。
+      if (
+        this.fiberEntries.has(current.id)
+        && (current.state === FiberState.LOADING || current.state === FiberState.UNLOADING)
+      ) return true
+    }
+    // 服务失效可等待另一棵所有权子树中的消费者清理。只对生命周期调用
+    // 使用保守判断；正常 ACTIVE Root 的并发操作仍然进入串行队列。
+    return this.awaitingFibers.size > 0
+      && (caller.state === FiberState.LOADING || caller.state === FiberState.UNLOADING)
+  }
+
+  private assertNotSelfWaiting(operation: string) {
+    if (this.isSelfWaiting(this.ctx.fiber)) {
+      throw new Error(`loader.${operation}() cannot self-wait during a lifecycle operation; only create() supports reentry`)
+    }
+  }
+
+  private assertParentAvailable(parentId: string | null) {
+    for (let current = parentId; current !== null;) {
+      if (this.removingRoots.has(current)) {
+        throw new Error(`entry "${current}" is being removed`)
+      }
+      current = this.requireRecord(current).parentId
+    }
+  }
+
   private async waitForFiber<Value>(
     fiber: Fiber,
     operation: () => Value | PromiseLike<Value>,
@@ -562,6 +691,10 @@ export class Loader extends Service {
       const count = this.awaitingFibers.get(fiber.id) ?? 1
       if (count === 1) this.awaitingFibers.delete(fiber.id)
       else this.awaitingFibers.set(fiber.id, count - 1)
+      // FAILED 事件先于 Core 完成失败诊断；稳定后再读取最终清理证据。
+      const entryId = this.fiberEntries.get(fiber.id)
+      const record = entryId === undefined ? undefined : this.records.get(entryId)
+      if (record && !this.disposingFibers.has(fiber.id)) this.syncFromFiber(record, fiber)
     }
   }
 
@@ -594,6 +727,7 @@ export class Loader extends Service {
       ...(record.hasError ? { error: record.error } : {}),
       ...(record.fiber ? { fiberId: record.fiber.id } : {}),
       ...(record.blockedBy ? { blockedBy: record.blockedBy } : {}),
+      dependencies: record.fiber?.inspect().dependencies ?? Object.freeze([]),
       config: record.config,
       inject: record.inject,
       intercept: record.intercept,
@@ -623,15 +757,40 @@ export class Loader extends Service {
   }
 
   private clearError(record: EntryRecord) {
+    if (record.cleanupBlocked) return
     record.hasError = false
     record.error = undefined
   }
 
   private fail(record: EntryRecord, error: unknown) {
+    if (record.cleanupBlocked) return
     record.hasError = true
     record.error = error
     record.state = 'failed'
     record.blockedBy = undefined
+  }
+
+  private blockCleanup(record: EntryRecord, error: unknown) {
+    record.cleanupBlocked = true
+    record.hasError = true
+    record.error = error
+    record.state = 'failed'
+    record.blockedBy = undefined
+  }
+
+  private observeCleanupFailure(record: EntryRecord, fiber: Fiber) {
+    if (record.cleanupBlocked) return
+    if (fiber.state !== FiberState.FAILED && fiber.state !== FiberState.DISPOSED) return
+    const failure = fiber.inspect().lastFailure
+    if (failure === record.acknowledgedCleanup) return
+    // 启动回滚失败的外层 phase 仍是 start；以公开的具体清理证据判别，
+    // 保留包含启动与回滚失败的完整原错误，而不阻断普通的启动失败恢复。
+    if (failure && (
+      failure.phase === 'cleanup'
+      || failure.failures.some(item => item.stage === 'cleanup'
+        || item.stage === 'service-invalidate'
+        || item.stage === 'service-finalize')
+    )) this.blockCleanup(record, failure.error)
   }
 
   private resolveParent(record: EntryRecord): ParentTarget {
@@ -642,6 +801,9 @@ export class Loader extends Service {
     }
 
     const parent = this.requireRecord(record.parentId)
+    if (parent.cleanupBlocked) {
+      return { blockedBy: parent.id, disabled: parent.disabled }
+    }
     if (parent.disabled || parent.state === 'disabled') {
       return {
         blockedBy: parent.blockedBy ?? parent.id,
@@ -680,9 +842,14 @@ export class Loader extends Service {
     const record = this.records.get(id)
     if (!record) return
 
+    if (record.cleanupBlocked) {
+      await this.blockChildren(record, record.id, record.disabled)
+      return
+    }
+
     if (record.disabled) {
       await this.disposeRecordFiber(record)
-      record.state = 'disabled'
+      if (!record.cleanupBlocked) record.state = 'disabled'
       record.blockedBy = undefined
       await this.blockChildren(record, record.id, true)
       return
@@ -691,8 +858,10 @@ export class Loader extends Service {
     const parent = this.resolveParent(record)
     if (!parent.context) {
       await this.disposeRecordFiber(record)
-      record.state = parent.disabled ? 'disabled' : 'pending'
-      record.blockedBy = parent.blockedBy
+      if (!record.cleanupBlocked) {
+        record.state = parent.disabled ? 'disabled' : 'pending'
+        record.blockedBy = parent.blockedBy
+      }
       await this.blockChildren(
         record,
         parent.blockedBy ?? record.parentId ?? record.id,
@@ -729,11 +898,13 @@ export class Loader extends Service {
   ): Promise<void> {
     const record = this.records.get(id)
     if (!record) return
-    await this.disposeRecordFiber(record)
+    if (!record.cleanupBlocked) await this.disposeRecordFiber(record)
 
     const disabled = ancestorDisabled || record.disabled
-    record.state = disabled ? 'disabled' : 'pending'
-    record.blockedBy = record.disabled ? undefined : blockedBy
+    if (!record.cleanupBlocked) {
+      record.state = disabled ? 'disabled' : 'pending'
+      record.blockedBy = record.disabled ? undefined : blockedBy
+    }
     for (const childId of record.children) {
       await this.blockSubtree(childId, blockedBy, disabled)
     }
@@ -743,6 +914,7 @@ export class Loader extends Service {
     record: EntryRecord,
     force: boolean,
   ) {
+    if (record.cleanupBlocked) return false
     const currentFiber = record.fiber
     if (currentFiber) {
       if (force && record.configDirty) {
@@ -786,17 +958,23 @@ export class Loader extends Service {
     this.clearError(record)
 
     try {
+      let definition: Component<any>
       if (record.type === 'group') {
-        record.definition = LoaderGroup
-      } else if (!record.definition) {
-        const resolution = await this.resolver({
+        definition = LoaderGroup
+      } else {
+        const request: LoaderResolveRequest = Object.freeze({
           id: record.id,
           name: record.name!,
           parentId: record.parentId,
           baseUrl: this.effectiveBaseUrl(record),
         })
-        if (this.disposed || !this.records.has(record.id)) return false
-        record.definition = normalizeLoaderResolution(resolution)
+        if (!record.resolution || !sameResolveRequest(record.resolution.request, request)) {
+          record.resolution = undefined
+          const resolution = await this.resolver(request)
+          if (this.disposed || this.records.get(record.id) !== record) return false
+          record.resolution = { request, definition: normalizeLoaderResolution(resolution) }
+        }
+        definition = record.resolution.definition
       }
 
       const latestParent = this.resolveParent(record)
@@ -807,17 +985,20 @@ export class Loader extends Service {
       }
 
       const fiber = latestParent.context.installComponent(
-        record.definition,
+        definition,
         record.type === 'group' ? undefined : record.config,
         this.installOptions(record),
       )
       record.fiber = fiber
       record.configDirty = false
+      record.installationDirty = false
+      record.acknowledgedCleanup = undefined
       this.fiberEntries.set(fiber.id, record.id)
       this.syncFromFiber(record, fiber)
       await this.waitForFiber(fiber, () => fiber.awaitStable())
       if (record.fiber === fiber) this.syncFromFiber(record, fiber)
     } catch (error) {
+      if (record.fiber) this.observeCleanupFailure(record, record.fiber)
       this.fail(record, error)
     }
 
@@ -837,27 +1018,35 @@ export class Loader extends Service {
       record.configDirty = false
       if (record.fiber === fiber) this.syncFromFiber(record, fiber)
     } catch (error) {
+      this.observeCleanupFailure(record, fiber)
       this.fail(record, error)
     }
   }
 
-  private async disposeRecordFiber(record: EntryRecord) {
+  private async disposeRecordFiber(record: EntryRecord): Promise<CleanupOutcome> {
     const fiber = record.fiber
-    if (!fiber) return
+    if (!fiber) return { ok: true }
 
+    this.disposingFibers.add(fiber.id)
     try {
       await this.waitForFiber(fiber, () => fiber.dispose())
+      return { ok: true }
     } catch (error) {
-      record.hasError = true
-      record.error = error
+      this.blockCleanup(record, error)
+      return { ok: false, error }
     } finally {
-      this.fiberEntries.delete(fiber.id)
-      if (record.fiber === fiber) record.fiber = undefined
+      this.disposingFibers.delete(fiber.id)
+      if (fiber.state === FiberState.DISPOSED) {
+        this.fiberEntries.delete(fiber.id)
+        if (record.fiber === fiber) record.fiber = undefined
+      }
     }
   }
 
   private syncFromFiber(record: EntryRecord, fiber: Fiber) {
     if (record.fiber !== fiber) return
+    this.observeCleanupFailure(record, fiber)
+    if (record.cleanupBlocked) return
     record.blockedBy = undefined
 
     if (record.configDirty && record.hasError) {
@@ -884,8 +1073,14 @@ export class Loader extends Service {
     if (!record || record.fiber?.id !== event.fiber.id) return
 
     if (event.type === 'detached') {
+      // 本层主动 dispose 的结果以 Promise 为准；lastFailure 可能是用户
+      // 刚通过 resolve 确认过的旧清理失败，不能在成功销毁时重新上锁。
+      if (!this.disposingFibers.has(event.fiber.id)) {
+        this.observeCleanupFailure(record, record.fiber)
+      }
       this.fiberEntries.delete(event.fiber.id)
       record.fiber = undefined
+      if (record.cleanupBlocked) return
       if (record.disabled) {
         record.state = 'disabled'
       } else {
@@ -897,6 +1092,7 @@ export class Loader extends Service {
       return
     }
 
+    if (record.cleanupBlocked) return
     record.blockedBy = undefined
     if (!(record.configDirty && record.hasError)) {
       record.state = mapFiberState(event.fiber.state)
@@ -920,6 +1116,7 @@ export class Loader extends Service {
         || event.fiber.state === FiberState.DISPOSED
       )
     ) {
+      if (event.fiber.state === FiberState.FAILED) this.schedule(entryId)
       for (const child of record.children) this.schedule(child)
     }
   }

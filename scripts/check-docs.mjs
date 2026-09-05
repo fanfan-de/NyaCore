@@ -114,7 +114,13 @@ async function validateLink(file, { target, line }) {
   }
 }
 
-const requiredFiles = [path.join(root, 'README.md'), path.join(root, 'AGENTS.md')]
+const requiredFiles = [
+  path.join(root, 'README.md'),
+  path.join(root, 'AGENTS.md'),
+  path.join(root, 'examples/task-journal/README.md'),
+  path.join(root, 'packages/timer/README.md'),
+  path.join(root, 'packages/loader/README.md'),
+]
 const files = [...requiredFiles, ...await collectMarkdown(path.join(root, 'docs'))]
 
 for (const file of files) {

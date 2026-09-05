@@ -5,3 +5,5 @@ dist/
 coverage/
 .vite/
 *.tsbuildinfo
+artifacts/
+/examples/task-journal/data/

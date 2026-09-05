@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
+import { checkExample } from './check-example.mjs'
 
 const repositoryRoot = resolve(import.meta.dirname, '..')
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'nya-package-check-'))
@@ -28,6 +29,10 @@ const packageSpecifications = [
   {
     directory: 'packages/logger-console',
     name: '@nya/logger-console',
+  },
+  {
+    directory: 'packages/timer',
+    name: '@nya/timer',
   },
 ]
 
@@ -137,6 +142,7 @@ try {
 import { Context, FiberState, type Fiber, type LogRecord } from '@nya/core'
 import { Loader, type EntrySnapshot, type LoaderResolver } from '@nya/loader'
 import { ConsoleLogger, type ConsoleLoggerOptions } from '@nya/logger-console'
+import { Timer, type TimerCallback } from '@nya/timer'
 
 const context = new Context()
 const fiber: Fiber = context.installComponent(() => undefined)
@@ -148,6 +154,12 @@ const resolver: LoaderResolver = async () => {
 const loader = context.installComponent(Loader, { resolver })
 const entry: EntrySnapshot | undefined = context.loader?.get('worker')
 context.installComponent(ConsoleLogger, options)
+context.installComponent(Timer)
+const callback: TimerCallback = async () => {}
+const cancel = context.timer.timeout(callback, 0)
+const dependencies = fiber.inspect().dependencies
+void cancel
+void dependencies
 void FiberState.ACTIVE
 void fiber
 void record
@@ -172,6 +184,7 @@ void entry
       import { Context, FiberState } from '@nya/core'
       import { Loader } from '@nya/loader'
       import { ConsoleLogger } from '@nya/logger-console'
+      import { Timer } from '@nya/timer'
       const app = new Context()
       const target = {
         debug() {},
@@ -185,6 +198,21 @@ void entry
         timestamps: false,
       })
       await logger
+      await app.installComponent(Timer)
+      let ticks = 0
+      let written
+      const observed = new Promise(resolve => { written = resolve })
+      const ticker = app.installComponent({
+        inject: ['timer'],
+        apply(ctx) {
+          ctx.timer.timeout(() => { ticks++; written() }, 0)
+          ctx.timer.interval(() => { throw new Error('cancelled interval ran') }, 10000)
+        },
+      })
+      await ticker
+      await observed
+      await ticker.dispose()
+      if (ticks !== 1 || ticker.inspect().effects.length) throw new Error('Timer ownership was not released')
       const loaderFiber = app.installComponent(Loader, {
         resolver: async () => () => undefined,
       })
@@ -209,6 +237,13 @@ void entry
     '--project',
     join(consumerRoot, 'tsconfig.json'),
   ], consumerRoot)
+
+  // 使用与分发命令相同的示例产物，不从 monorepo 源码路径运行教程。
+  runNpm(['run', 'build', '--workspace', '@nya/example-task-journal'])
+  checkExample(temporaryRoot, packageSpecifications.map((specification, index) => ({
+    name: specification.name,
+    tarball: tarballs[index],
+  })), runNpm)
 
   const summary = packageResults.map(result => {
     return `${result.filename}（${result.entryCount} 个文件）`

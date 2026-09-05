@@ -21,6 +21,9 @@ export const serviceCapture = Symbol('@nya/core/service.capture')
 /** Fiber 订阅服务地址变化的包内协议，不从公共入口导出。 */
 export const serviceSubscribe = Symbol('@nya/core/service.subscribe')
 
+/** Fiber 只读投影服务元数据与已经执行的 check 结果，不重新解析依赖。 */
+export const serviceInspectDependencies = Symbol('@nya/core/service.inspect-dependencies')
+
 /** ServiceRegistry 从 Fiber 固定快照读取实现的包内协议。 */
 export const fiberGetServiceImplementation = Symbol(
   '@nya/core/fiber.get-service-implementation',

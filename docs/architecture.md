@@ -6,7 +6,7 @@
 
 本文用一组互补视图说明 Nya Core 当前的系统边界、核心构件、运行时关系和必须维持的不变量。它不承担完整 API Reference，也不把[目标设计](./design.md)中尚未实现的能力描述成当前架构。
 
-判断当前行为时，以 `packages/core/`、`packages/loader/` 与 `packages/logger-console/` 的源码、导出类型和行为测试以及[核心概念指南](./concepts.md)为证据。图中的箭头表达运行时职责或关系，不等同于 TypeScript 文件之间的 import 方向。
+判断当前行为时，以 `packages/core/`、`packages/loader/`、`packages/logger-console/` 与 `packages/timer/` 的源码、导出类型和行为测试以及[核心概念指南](./concepts.md)为证据。图中的箭头表达运行时职责或关系，不等同于 TypeScript 文件之间的 import 方向。
 
 ## 1. 三十秒理解
 
@@ -38,6 +38,7 @@ flowchart LR
         Core["@nya/core<br/>作用域运行时"]
         Loader["@nya/loader<br/>内存 Entry 树与模块解析"]
         ConsoleLogger["@nya/logger-console<br/>可选控制台 sink"]
+        Timer["@nya/timer<br/>调用方所有的 timeout / interval"]
         Components["应用组件<br/>函数、class 或带 apply 的对象"]
 
         Host -->|"创建 Root Context<br/>安装或卸载组件"| Core
@@ -47,6 +48,8 @@ flowchart LR
         Components -->|"声明 Inject、提供 Service<br/>登记 Effect 与 Event"| Core
         ConsoleLogger -->|"显式安装并订阅结构化日志"| Core
         ConsoleLogger -->|"格式化并输出"| Host
+        Timer -->|"只使用公开 Service 与 Effect 协议"| Core
+        Components -->|"ctx.timer.timeout / interval"| Timer
     end
 
     Resources["进程内或进程外资源<br/>定时器、监听器、连接、文件、后台任务"]
@@ -55,14 +58,16 @@ flowchart LR
     Core -.->|"保存并调用组件提交的清理路径"| Resources
 ```
 
-当前边界有三点需要明确：
+当前边界需要明确：
 
 - Core 接收宿主已经提供的组件定义，不负责发现、导入或热替换模块；`@nya/loader` 可以通过可替换 Resolver 导入模块，但不负责 HMR；
 - Core 管理资源的生命周期协议，但不实现数据库、网络或业务服务本身；
 - Core 只观察通过其公开所有权协议登记的资源，不枚举宿主进程中的任意句柄，也不为 cleanup 设置统一超时；
 - Context 是进程内作用域协议，不是权限、安全或进程沙箱。
 
-Loader、配置文件、HMR、控制台输出和分布式生命周期不属于 `@nya/core`。内存 Entry 加载已经由独立的 `@nya/loader` Service 提供，控制台输出由 `@nya/logger-console` Component 提供；文件持久化、HMR 和分布式生命周期仍未实现。
+Loader、配置文件、HMR、控制台输出、定时器封装和分布式生命周期不属于 `@nya/core`。内存 Entry 加载已经由独立的 `@nya/loader` Service 提供，控制台输出由 `@nya/logger-console` Component 提供，timeout/interval 由 `@nya/timer` Service 提供；配置文件持久化、HMR 和分布式生命周期仍未实现。
+
+Timer 显式安装后提供 `ctx.timer`，每次调用通过 Service facade 把计时器 Effect 登记到调用方 Fiber 或其当前嵌套 Effect。取消只停止后续调度，不等待在途回调；原生 interval 允许异步回调重叠，回调失败会停止后续调度并记录原错误。当前没有 Context mixin、debounce 等高级计时能力。边界由[Timer 实现](../packages/timer/src/index.ts)和[所有权及取消测试](../packages/timer/tests/timer.spec.ts)证明。
 
 ## 3. 核心构件
 
@@ -126,7 +131,7 @@ flowchart TB
 | ServiceRegistry / Service | 注册具名服务、捕获依赖快照、维护反向订阅、绑定 Service 调用方 Context 并通知消费者 | [`service.ts`](../packages/core/src/service.ts) |
 | EventRegistry | 保存带订阅 Context 的 Hook，提供多模式派发和作用域过滤 | [`events.ts`](../packages/core/src/events.ts) |
 | LoggerHub / Logger | 在 Root 内缓冲结构化记录、隔离 sink 错误，并把 Logger 绑定到调用方 Fiber | [`logger.ts`](../packages/core/src/logger.ts) |
-| Fiber 诊断 | 旁路跟踪结构化 Effect 节点，生成当前 run 与最近失败 run 的冻结快照 | [`diagnostics.ts`](../packages/core/src/diagnostics.ts) |
+| Fiber 诊断 | 旁路跟踪结构化 Effect 节点，生成当前 run、最近失败 run 与依赖可用状态的冻结快照 | [`diagnostics.ts`](../packages/core/src/diagnostics.ts)、[`service.ts`](../packages/core/src/service.ts) |
 | 协议 Symbol | 支持 Context 识别、事件过滤和 Service 生命周期协议 | [`symbols.ts`](../packages/core/src/symbols.ts) |
 
 `index.ts` 是公共 API 边界；某个内部类存在不代表它一定是稳定契约，实际导出以 [`packages/core/src/index.ts`](../packages/core/src/index.ts) 为准。
@@ -373,6 +378,10 @@ flowchart LR
 - `disposing` 节点和状态时间帮助定位长期清理，但 Core 不强制超时，也不自动宣称泄漏；
 - 快照是只读普通对象，不允许通过诊断 API 修改 Effect、Fiber 或内部索引。
 
+`fiber.inspect().dependencies` 按 Inject 顺序列出必需服务的可用状态、阻塞原因和已知提供方身份。它读取当前隔离地址中的实现元数据和最近一次捕获中执行过的 check 结果；`Service.check` 返回 false、抛错、提供方尚未 ACTIVE 和实现已失效会分别呈现，抛错保留原值。原有依赖解析仍在首个阻塞处短路，后续尚未执行 check 的依赖标为 `unchecked`，读取诊断不会再次调用 check。
+
+已执行 `provide()` 的实现与同地址的静态 `Service.provide` 声明使用不同标记；声明只能说明已安装候选，普通组件未执行 `provide()` 时无法推断它将提供什么服务。提供方快照仅包含身份与状态，不包含实例或 Context；销毁时撤销声明和当前检查缓存，旧的值快照保持不变。上述行为见[依赖诊断测试](../packages/core/tests/dependency-diagnostics.spec.ts)。
+
 该边界由 [ADR-0005](./adr/0005-runtime-observability.md) 固定。
 
 ## 7. 架构不变量
@@ -413,8 +422,9 @@ flowchart LR
 | Service | `(服务名, 隔离标签)` 严格寻址；Inject 快照按地址驱动消费者启停；调用方 Context Proxy、intercept 配置、`init`、`check` 与配置合并协议 | callable Service、`extend` 与 mixin |
 | Effect | CleanupSource、失败回滚、幂等 LIFO 清理、聚合错误和结构化诊断树 | 更丰富的宿主资源探针 |
 | Event | 生命周期绑定、Context 过滤和五种派发模式；Service `thisArg` 按调用方隔离地址过滤 | 更完整的业务级事件调试工具 |
-| Observability | Root 内 Logger、1000 条缓冲、Registry 生命周期快照、当前与最近失败诊断 | 外部持久化、查询与告警后端 |
-| 包边界 | `@nya/core`、`@nya/loader`、`@nya/logger-console` 和 playground；外围包只使用 Core 公开 API | 文件配置、`@nya/hmr` 等其他外围包 |
+| Observability | Root 内 Logger、1000 条缓冲、Registry 生命周期快照、当前与最近失败诊断、只读依赖等待原因 | 外部持久化、查询与告警后端 |
+| Timer | 独立 `@nya/timer` 的调用方所有 timeout/interval；取消停止未来调度 | Context mixin、debounce 等高级计时能力 |
+| 包边界 | `@nya/core`、`@nya/loader`、`@nya/logger-console`、`@nya/timer` 和 playground；外围包只使用 Core 公开 API | 文件配置、`@nya/hmr` 等其他外围包 |
 
 目标语义、非目标和建议的后续包见[核心设计](./design.md)。其中标记为 Proposed 的内容应在图中使用虚线或 `«proposed»`，并与本文的 Current 视图分开维护。
 
@@ -422,8 +432,8 @@ flowchart LR
 
 | 要确认的事实 | 首选证据 |
 | --- | --- |
-| 当前公共 API | [`@nya/core` 入口](../packages/core/src/index.ts)、[`@nya/loader` 入口](../packages/loader/src/index.ts)与导出类型 |
-| 当前可观察行为 | `packages/core/tests/`、`packages/loader/tests/`、[核心概念指南](./concepts.md) |
+| 当前公共 API | [`@nya/core` 入口](../packages/core/src/index.ts)、[`@nya/loader` 入口](../packages/loader/src/index.ts)、[`@nya/timer` 入口](../packages/timer/src/index.ts)与导出类型 |
+| 当前可观察行为 | `packages/core/tests/`、`packages/loader/tests/`、`packages/timer/tests/`、[核心概念指南](./concepts.md) |
 | 当前架构关系 | 上述实现证据与本文 |
 | 目标架构和未来约束 | 状态明确的[核心设计](./design.md) |
 | 为什么接受某项跨模块决策 | [ADR 索引](./adr/README.md)中的对应记录 |

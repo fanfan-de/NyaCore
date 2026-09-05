@@ -1,0 +1,32 @@
+{
+  "name": "@nya/example-task-journal",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "vitest run --exclude \"**/*.test.mjs\" && node --test tests/development.test.mjs",
+    "test:signals": "node tests/signals.mjs",
+    "start": "node dist/main.js",
+    "demo": "node dist/main.js --demo",
+    "dev": "node scripts/dev.mjs"
+  },
+  "dependencies": {
+    "@nya/core": "0.0.0",
+    "@nya/loader": "0.0.0",
+    "@nya/logger-console": "0.0.0",
+    "@nya/timer": "0.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "typescript": "5.9.3",
+    "vite": "8.2.1",
+    "vitest": "4.1.10"
+  },
+  "overrides": {
+    "vite": "8.2.1",
+    "vitest": "4.1.10"
+  }
+}

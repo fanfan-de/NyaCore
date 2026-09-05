@@ -12,21 +12,26 @@ export type CleanupSource =
 
 // 清理函数属于公开 API，因此在框架边界统一保证幂等，
 // 不要求每一种资源实现自行处理重复清理。
-function once(dispose: Disposer): Disposer {
+export function once(dispose: Disposer): () => Promise<void> {
   let task: Promise<void> | undefined
 
   return () => {
     if (task) return task
 
-    try {
-      task = Promise.resolve(dispose())
-    } catch (error) {
-      task = Promise.reject(error)
-    }
-
-    // 调用方可能不会等待清理函数。返回的 Promise 仍可向主动等待者暴露错误，
-    // 同时挂载空拒绝处理，避免产生未处理的 Promise 拒绝。
+    // 必须先缓存，再进入用户清理或日志回调；Promise executor 只登记 resolver，
+    // 否则同步重入仍会发生在 task 赋值之前。
+    let resolveTask!: (value: void | PromiseLike<void>) => void
+    let rejectTask!: (reason: unknown) => void
+    task = new Promise<void>((resolve, reject) => {
+      resolveTask = resolve
+      rejectTask = reject
+    })
     void task.catch(() => { })
+    try {
+      resolveTask(dispose())
+    } catch (error) {
+      rejectTask(error)
+    }
     return task
   }
 }
@@ -61,24 +66,12 @@ export class DisposableStack {
       throw new Error('cannot add a disposer to a disposed stack')
     }
 
-    const cleanup = once(dispose)
-    let task: Promise<void> | undefined
-    const registered: Disposer = () => {
-      if (task) return task
-
-      try {
-        task = Promise.resolve(cleanup()).then(() => {
-          // 主动清理成功后立即解除栈对资源闭包的强引用；失败项继续保留，
-          // 让所属 Fiber 最终清理时仍能观察同一个拒绝结果。
-          const index = this.#disposers.indexOf(registered)
-          if (index >= 0) this.#disposers.splice(index, 1)
-        })
-      } catch (error) {
-        task = Promise.reject(error)
-      }
-      void task.catch(() => {})
-      return task
-    }
+    const registered = once(() => Promise.resolve(dispose()).then(() => {
+      // 主动清理成功后立即解除栈对资源闭包的强引用；失败项继续保留，
+      // 让所属 Fiber 最终清理时仍能观察同一个拒绝结果。
+      const index = this.#disposers.indexOf(registered)
+      if (index >= 0) this.#disposers.splice(index, 1)
+    }))
     this.#disposers.push(registered)
     return registered
   }
@@ -87,12 +80,13 @@ export class DisposableStack {
   dispose(): Promise<void> {
     if (this.#disposeTask) return this.#disposeTask
 
-    // 缓存内部清理 Promise，让本次调用返回后的重复或并发调用复用同一任务。
-    this.#disposeTask = this.#dispose()
-
-    // 有些调用方会直接调用 dispose() 而不 await。这里附加空的拒绝处理
-    // 只为避免未处理拒绝警告；原 Promise 仍会把错误暴露给主动 await 的调用方。
+    // 第一条 cleanup 执行前就关闭栈，重入 add() 被拒绝，dispose() 复用同一任务。
+    let resolveTask!: (value: void | PromiseLike<void>) => void
+    this.#disposeTask = new Promise<void>(resolve => {
+      resolveTask = resolve
+    })
     void this.#disposeTask.catch(() => { })
+    resolveTask(this.#dispose())
     return this.#disposeTask
   }
 
