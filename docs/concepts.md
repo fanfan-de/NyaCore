@@ -733,8 +733,9 @@ DisposableStack 是一组 Disposer 的幂等、后进先出容器：
 EffectScope 在 DisposableStack 之上增加“执行一次资源创建函数并收集其 CleanupSource”的能力：
 
 - 一个 scope 只能 `start()` 一次；
+- 调用 `dispose()` 后，`start()` 会在执行资源创建函数前同步抛错，包括清理尚未完成或已经失败的情况；
 - `ready` 表示异步 CleanupSource 是否已经收集稳定；
-- `dispose` 会先等待初始化结束，再清理资源；
+- `dispose` 会先等待已经开始的初始化结束，再清理资源；初始化最终返回的清理函数仍会被收集和执行；
 - 初始化失败时会自动回滚已经收集到的资源。
 
 Fiber 使用 EffectScope 把组件入口和普通 `context.effect()` 统一到同一种资源协议中。

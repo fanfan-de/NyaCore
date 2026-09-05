@@ -1,7 +1,7 @@
-/** 本文件验证清理栈的同步重入、并发等待、清理顺序与原始失败传播。 */
+/** 本文件验证清理栈与 EffectScope 的生命周期边界、并发等待和原始失败传播。 */
 
 import { describe, expect, it, vi } from 'vitest'
-import { DisposableStack } from '../src/index.js'
+import { DisposableStack, EffectScope } from '../src/index.js'
 import type { Disposer } from '../src/index.js'
 
 function deferred() {
@@ -9,6 +9,91 @@ function deferred() {
   const promise = new Promise<void>((done) => { resolve = done })
   return { promise, resolve }
 }
+
+describe('EffectScope reliability', () => {
+  it.each(['requested', 'completed'])('rejects setup after disposal is %s', async phase => {
+    const scope = new EffectScope()
+    const cleanup = vi.fn()
+    const setup = vi.fn(() => cleanup)
+    const disposal = scope.dispose()
+    if (phase === 'completed') await disposal
+
+    expect(() => scope.start(setup)).toThrow('cannot start a disposed effect scope')
+    expect(setup).not.toHaveBeenCalled()
+    expect(scope.dispose()).toBe(disposal)
+    await disposal
+    await scope.ready
+    expect(cleanup).not.toHaveBeenCalled()
+  })
+
+  it('rejects setup during cleanup and after failure without replacing the disposal result', async () => {
+    const scope = new EffectScope()
+    const started = deferred()
+    const gate = deferred()
+    const failure = new Error('cleanup failed')
+    const setup = vi.fn()
+    const cleanup = vi.fn(async () => {
+      started.resolve()
+      await gate.promise
+      throw failure
+    })
+    scope.add(cleanup)
+    const disposal = scope.dispose()
+
+    try {
+      await started.promise
+      expect(() => scope.start(setup)).toThrow('cannot start a disposed effect scope')
+      expect(setup).not.toHaveBeenCalled()
+      expect(scope.dispose()).toBe(disposal)
+    } finally {
+      gate.resolve()
+    }
+
+    await expect(disposal).rejects.toBe(failure)
+    expect(() => scope.start(setup)).toThrow('cannot start a disposed effect scope')
+    expect(setup).not.toHaveBeenCalled()
+    expect(scope.dispose()).toBe(disposal)
+    await expect(scope.dispose()).rejects.toBe(failure)
+    expect(cleanup).toHaveBeenCalledOnce()
+  })
+
+  it('still waits for existing async setup and its cleanup when disposal is requested', async () => {
+    const scope = new EffectScope()
+    const setupGate = deferred()
+    const cleanupStarted = deferred()
+    const cleanupGate = deferred()
+    const cleanup = vi.fn(async () => {
+      cleanupStarted.resolve()
+      await cleanupGate.promise
+    })
+    scope.start(async () => {
+      await setupGate.promise
+      return cleanup
+    })
+    const disposal = scope.dispose()
+    let finished = false
+    void Promise.resolve(disposal).then(() => { finished = true })
+
+    try {
+      await Promise.resolve()
+      expect(finished).toBe(false)
+      expect(cleanup).not.toHaveBeenCalled()
+      setupGate.resolve()
+      await cleanupStarted.promise
+      expect(finished).toBe(false)
+      expect(cleanup).toHaveBeenCalledOnce()
+      expect(scope.dispose()).toBe(disposal)
+    } finally {
+      setupGate.resolve()
+      cleanupGate.resolve()
+    }
+
+    await disposal
+    await scope.dispose()
+    expect(finished).toBe(true)
+    expect(cleanup).toHaveBeenCalledOnce()
+  })
+})
 
 describe('DisposableStack reliability', () => {
   it('marks disposal before cleanup can register more work', async () => {

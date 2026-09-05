@@ -163,10 +163,13 @@ export class EffectScope {
   ready: Promise<void> = Promise.resolve()
   #stack = new DisposableStack()
   #started = false
+  #disposed = false
 
   constructor(label = 'anonymous') {
     this.label = label
     this.dispose = once(async () => {
+      // 等待初始化前就关闭启动入口，避免同一调用栈中的 start() 创建新资源。
+      this.#disposed = true
       await this.ready.catch(() => { })
       await this.#stack.dispose()
     })
@@ -178,6 +181,7 @@ export class EffectScope {
 
   start(execute: () => CleanupSource) {
     if (this.#started) throw new Error('effect scope has already started')
+    if (this.#disposed) throw new Error('cannot start a disposed effect scope')
     this.#started = true
 
     let source: CleanupSource
