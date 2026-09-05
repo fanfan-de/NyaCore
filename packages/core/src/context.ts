@@ -110,9 +110,11 @@ export class Context {
   static readonly filter: typeof contextFilter = contextFilter
 
   readonly [contextMarker] = true
+  /** @internal Context 派生使用的隔离地址映射。 */
   readonly [contextIsolations]!: Readonly<
     Record<string, IsolationLabel | undefined>
   >
+  /** @internal Context 派生使用的调用配置映射。 */
   readonly [contextIntercepts]!: Readonly<Record<string, unknown>>
   readonly root: this
   readonly fiber: Fiber

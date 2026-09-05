@@ -204,10 +204,12 @@ export class Fiber implements PromiseLike<void> {
     }
   }
 
+  /** @internal 仅由 Context 建立根 Fiber。 */
   static root(context: Context) {
     return new Fiber({ context, parent: null, runtime: null })
   }
 
+  /** @internal 仅由 Registry 建立受安装 Effect 所有的 Fiber。 */
   static component(options: {
     context: Context
     parent: Fiber
@@ -253,7 +255,7 @@ export class Fiber implements PromiseLike<void> {
     return this.#config
   }
 
-  /** Effect 和子组件只能在根、LOADING 或 ACTIVE 的运行上下文中创建。 */
+  /** @internal Effect 和子组件只能在根、LOADING 或 ACTIVE 的运行上下文中创建。 */
   assertActive() {
     if (this.state !== FiberState.ACTIVE && this.state !== FiberState.LOADING) {
       throw new Error('inactive context')
@@ -261,6 +263,7 @@ export class Fiber implements PromiseLike<void> {
   }
 
   /**
+   * @internal
    * 挂载组件实例并开始观察依赖。无依赖组件会得到空快照并正常启动；
    * 有缺失依赖的组件保持 PENDING，直到 ServiceRegistry 发出变化通知。
    */
@@ -285,7 +288,7 @@ export class Fiber implements PromiseLike<void> {
     return this
   }
 
-  /** 服务 slot 变化时重新捕获目标快照，并让串行协调循环收敛过去。 */
+  /** 重新评估当前依赖目标，包括 Service.check；调用后用 awaitStable() 等待协调稳定。 */
   refreshDependencies() {
     if (
       this.isRoot
@@ -306,7 +309,7 @@ export class Fiber implements PromiseLike<void> {
     this.#scheduleReconcile()
   }
 
-  /** 包内读取当前运行快照中的实现，并强制校验捕获时的服务地址。 */
+  /** @internal 包内读取当前运行快照中的实现，并强制校验捕获时的服务地址。 */
   [fiberGetServiceImplementation](
     name: string,
     address: ServiceAddress,
@@ -330,7 +333,7 @@ export class Fiber implements PromiseLike<void> {
     return implementation
   }
 
-  /** 返回当前 Provider run 的不可伪造内部身份与固定依赖快照。 */
+  /** @internal 返回当前 Provider run 的不可伪造内部身份与固定依赖快照。 */
   [fiberGetServiceSource]() {
     return {
       run: this.#activeRun,
@@ -338,7 +341,7 @@ export class Fiber implements PromiseLike<void> {
     }
   }
 
-  /** 登记当前 run 的卸载前工作；返回函数只撤销登记，不执行回调。 */
+  /** @internal 登记当前 run 的卸载前工作；返回函数只撤销登记，不执行回调。 */
   [fiberBeforeUnload](
     invalidate: Disposer,
     finalize?: Disposer,
@@ -620,7 +623,7 @@ export class Fiber implements PromiseLike<void> {
     return this[fiberDisposeFromOwner]()
   }
 
-  /** Registry 在父级安装 Effect 建立后绑定其幂等清理入口。 */
+  /** @internal Registry 在父级安装 Effect 建立后绑定其幂等清理入口。 */
   [fiberSetOwnerDisposer](dispose: Disposer) {
     if (this.isRoot || this.#ownerDisposer) {
       throw new Error('fiber owner disposer is already assigned')
@@ -628,7 +631,7 @@ export class Fiber implements PromiseLike<void> {
     this.#ownerDisposer = dispose
   }
 
-  /** 父级安装 Effect 内部使用的实际永久销毁入口。 */
+  /** @internal 父级安装 Effect 内部使用的实际永久销毁入口。 */
   [fiberDisposeFromOwner](): Promise<void> {
     if (this.#disposeOperation) return this.#disposeOperation
 

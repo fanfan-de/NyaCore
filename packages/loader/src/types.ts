@@ -31,7 +31,7 @@ interface EntryInputBase {
   readonly intercept?: Readonly<Record<string, unknown>>
   /** 只作用于本次安装的严格 Service 隔离标签。 */
   readonly isolate?: Readonly<Record<string, IsolationLabel>>
-  /** 相对模块名使用的 URL 基址；子条目会继承最近的祖先值。 */
+  /** 模块解析基址；默认 Resolver 要求绝对 file: URL，子条目继承最近祖先值。 */
   readonly baseUrl?: string
 }
 
@@ -101,6 +101,6 @@ export type LoaderResolver = (
 export interface LoaderConfig {
   /** 默认使用动态 import；测试、注册表和宿主环境可以提供自己的解析器。 */
   readonly resolver?: LoaderResolver
-  /** 没有 Entry / 祖先覆盖时，相对模块名使用的 URL 基址。 */
+  /** 没有 Entry / 祖先覆盖时的宿主基址，默认 Resolver 用它解析相对文件与裸包名。 */
   readonly baseUrl?: string
 }

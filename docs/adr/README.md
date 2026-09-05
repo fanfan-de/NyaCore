@@ -27,6 +27,7 @@ Accepted ADR 不应通过改写历史来适配新结论。需要改变决策时�
 | [0010](./0010-runtime-reliability.md) | 生命周期重入与清理失败恢复 | Proposed |
 | [0011](./0011-application-host-lifecycle.md) | 应用组合与宿主进程生命周期 | Proposed |
 | [0012](./0012-development-lifecycle-boundaries.md) | 依赖诊断与开发辅助的生命周期边界 | Proposed |
+| [0013](./0013-release-contract.md) | 发布契约与宿主模块解析 | Proposed |
 
 ## 新建 ADR
 

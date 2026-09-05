@@ -1,6 +1,6 @@
 {
   "name": "@nya/core",
-  "version": "0.0.0",
+  "version": "0.1.0-rc.1",
   "description": "Core runtime for the Nya framework",
   "keywords": [
     "component-runtime",

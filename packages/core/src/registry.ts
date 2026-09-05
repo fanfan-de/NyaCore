@@ -311,7 +311,7 @@ export class Registry {
     }
   }
 
-  /** Fiber 状态提交后的包内通知入口。 */
+  /** @internal Fiber 状态提交后的包内通知入口。 */
   [registryNotifyFiberState](
     fiber: Fiber,
     previousState: FiberState,

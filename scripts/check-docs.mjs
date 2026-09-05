@@ -117,6 +117,9 @@ async function validateLink(file, { target, line }) {
 const requiredFiles = [
   path.join(root, 'README.md'),
   path.join(root, 'AGENTS.md'),
+  path.join(root, 'CHANGELOG.md'),
+  path.join(root, 'packages/core/README.md'),
+  path.join(root, 'packages/logger-console/README.md'),
   path.join(root, 'examples/task-journal/README.md'),
   path.join(root, 'packages/timer/README.md'),
   path.join(root, 'packages/loader/README.md'),

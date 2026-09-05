@@ -743,7 +743,7 @@ export class ServiceRegistry {
     }
   }
 
-  /** 为一次组件运行捕获全部必需服务；任意一项不可用时返回 undefined。 */
+  /** @internal 为一次组件运行捕获全部必需服务；任意一项不可用时返回 undefined。 */
   [serviceCapture](
     context: Context,
     inject: ResolvedInject,
@@ -782,7 +782,7 @@ export class ServiceRegistry {
     }
   }
 
-  /** 不创建 slot、不运行 check；把当前身份和本次捕获结果组合成冻结值快照。 */
+  /** @internal 不创建 slot、不运行 check；把当前身份和本次捕获结果组合成冻结值快照。 */
   [serviceInspectDependencies](
     context: Context,
     inject: ResolvedInject,
@@ -837,7 +837,7 @@ export class ServiceRegistry {
     return Object.freeze(dependencies)
   }
 
-  /** 把 Fiber 加入所有依赖 slot 的反向索引，永久卸载时由返回函数取消。 */
+  /** @internal 把 Fiber 加入所有依赖 slot 的反向索引，永久卸载时由返回函数取消。 */
   [serviceSubscribe](
     context: Context,
     fiber: Fiber,
@@ -865,7 +865,7 @@ export class ServiceRegistry {
     }
   }
 
-  /** Provider 跨越 ACTIVE 边界时，其拥有的全部服务都要重新检查依赖。 */
+  /** @internal Provider 跨越 ACTIVE 边界时，其拥有的全部服务都要重新检查依赖。 */
   onFiberStateChange(fiber: Fiber, oldState: FiberState, newState: FiberState) {
     if (
       (oldState === FiberState.ACTIVE)
@@ -952,7 +952,7 @@ export class ServiceRegistry {
     )
   }
 
-  /** Service 事件只对同一 Root、同一调用方服务地址中的监听器可见。 */
+  /** @internal Service 事件只对同一 Root、同一调用方服务地址中的监听器可见。 */
   [serviceContextFilter](source: Context, target: Context, name: string) {
     if (source.root.services !== this || target.root.services !== this) {
       return false

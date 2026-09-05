@@ -2,6 +2,8 @@
 
 `@nya/timer` 提供由 Nya Effect 管理的最小定时器服务。导入包没有副作用，安装 `Timer` 后通过 `ctx.timer` 使用。
 
+当前候选为 `0.1.0-rc.1`，需要 Node.js ≥22.12.0 和 Core peer `^0.1.0-rc.1`。从同批 `vendor/` 安装 Core 与 Timer tarball；不支持混用 `0.0.x` 或 `0.2.x` Core。候选尚不表示已发布到 npm。
+
 资源归属模式参考 [Cordis Timer](https://github.com/cordiverse/cordis/blob/main/packages/timer/src/index.ts)，本包通过 Nya 的 Service 调用方语义和 Effect 清理协议实现。
 
 ```ts

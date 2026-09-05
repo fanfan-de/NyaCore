@@ -15,6 +15,7 @@ function formatPath(path: StandardSchemaV1.Issue['path']) {
 
 /** Standard Schema 返回 issues 时由 Core 暴露的统一错误。 */
 export class ValidationError extends TypeError {
+  /** @internal 使用 ValidationError.is() 识别，不直接依赖内部标记。 */
   readonly [validationErrorMarker] = true
   readonly issues: readonly StandardSchemaV1.Issue[]
 

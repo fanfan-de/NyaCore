@@ -1,11 +1,34 @@
 /** 真实文件及宿主 node_modules 验证默认 Resolver 的 Node ESM 解析边界。 */
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
-import { defaultLoaderResolver, normalizeLoaderResolution } from '../src/resolver.js'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { promisify } from 'node:util'
+import ts from 'typescript'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+
+const execute = promisify(execFile)
+let nativeDirectory: string
+let nativeModule: string
+
+beforeAll(async () => {
+  const source = fileURLToPath(new URL('../src/resolver.ts', import.meta.url))
+  // Vite 的动态 import 拦截不能代表 Node 对编码 file URL 的处理。
+  // 转译当前源码到同一包作用域，再用真实 Node 子进程执行，不读取旧 lib。
+  nativeDirectory = await mkdtemp(join(dirname(source), '.resolver-native-'))
+  const filename = join(nativeDirectory, 'resolver.mjs')
+  const transformed = ts.transpileModule(await readFile(source, 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  })
+  await writeFile(filename, transformed.outputText, 'utf8')
+  nativeModule = pathToFileURL(filename).href
+})
+
+afterAll(async () => {
+  if (nativeDirectory) await rm(nativeDirectory, { recursive: true, force: true })
+})
 
 const directories: string[] = []
 afterEach(async () => {
@@ -29,9 +52,29 @@ async function fixture() {
   return { host, write, component, hostModule, hostDirectory }
 }
 
-async function resolve(name: string, baseUrl?: string) {
-  const resolution = await defaultLoaderResolver({ id: 'probe', name, baseUrl, parentId: null })
-  return normalizeLoaderResolution(resolution)
+async function resolve(name: string, baseUrl?: string, repeat = false) {
+  const script = `
+    const { defaultLoaderResolver, normalizeLoaderResolution } = await import(process.argv[1]);
+    const { repeat, ...request } = JSON.parse(process.argv[2]);
+    try {
+      const definition = normalizeLoaderResolution(await defaultLoaderResolver(request));
+      const sameDefinition = repeat
+        ? definition === normalizeLoaderResolution(await defaultLoaderResolver(request))
+        : undefined;
+      process.stdout.write(JSON.stringify({ ok: true, name: definition.name, sameDefinition }));
+    } catch (error) {
+      process.stdout.write(JSON.stringify({ ok: false, message: error.message, code: error.code }));
+    }
+  `
+  const { stdout } = await execute(process.execPath, [
+    '--input-type=module', '--eval', script, nativeModule,
+    JSON.stringify({ id: 'probe', name, baseUrl, parentId: null, repeat }),
+  ])
+  const result = JSON.parse(stdout) as
+    | { ok: true; name: string; sameDefinition?: boolean }
+    | { ok: false; message: string; code?: string }
+  if (!result.ok) throw Object.assign(new Error(result.message), { code: result.code })
+  return result
 }
 
 describe('default Node ESM resolver', () => {
@@ -111,13 +154,29 @@ describe('default Node ESM resolver', () => {
     await expect(resolve('nya-default-plugin', f.hostModule)).resolves.toMatchObject({ name: 'default-condition' })
   })
 
+  it('loads a CommonJS npm entry through native import default interop', async () => {
+    const f = await fixture()
+    await f.write('node_modules/nya-commonjs-plugin/package.json', JSON.stringify({
+      name: 'nya-commonjs-plugin', main: './index.cjs',
+    }))
+    await f.write('node_modules/nya-commonjs-plugin/index.cjs', 'module.exports = function commonjsPlugin() {}\n')
+    await expect(resolve('nya-commonjs-plugin', f.hostModule)).resolves.toMatchObject({ name: 'commonjsPlugin' })
+  })
+
+  it('preserves Node errors for missing extensions and directory imports', async () => {
+    const f = await fixture()
+    await f.write('component.mjs', f.component('explicit-extension'))
+    await f.write('folder/index.mjs', f.component('explicit-index'))
+    await expect(resolve('./component', f.hostModule)).rejects.toMatchObject({ code: 'ERR_MODULE_NOT_FOUND' })
+    await expect(resolve('./folder/', f.hostModule)).rejects.toMatchObject({ code: 'ERR_UNSUPPORTED_DIR_IMPORT' })
+  })
+
   it.each(['./host.mjs', 'https://example.com/main.mjs', 'C:\\host\\main.mjs'])('rejects a non-file baseUrl %s clearly', async baseUrl => {
     await expect(resolve('nya-plugin', baseUrl)).rejects.toThrow('baseUrl')
   })
 
   it('keeps absolute data modules and normalized definition identity without cache busting', async () => {
     const name = 'data:text/javascript,export default function plugin() {}'
-    const first = await resolve(name)
-    expect(await resolve(name)).toBe(first)
+    await expect(resolve(name, undefined, true)).resolves.toMatchObject({ name: 'plugin', sameDefinition: true })
   })
 })

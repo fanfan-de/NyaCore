@@ -6,6 +6,10 @@
 
 | 需求 | 文档 | 类型 | 状态 |
 | --- | --- | --- | --- |
+| 从零编写组件、服务、资源与恢复 | [框架入门教程](./tutorials/framework-basics.md) | Tutorial | Current |
+| 确认 0.1 的公开边界与兼容承诺 | [兼容政策](./compatibility.md) | Specification | Current |
+| 升级开发版到候选 | [迁移指南](./how-to/migrate-0.1.md) | How-to | Current |
+| 查看候选版本变化 | [版本记录](../CHANGELOG.md) | Reference | Current |
 | 独立安装并嵌入一个完整应用 | [任务日志应用教程](./tutorials/task-journal.md) | Tutorial | Current |
 | 排查等待、使用 Timer 与构建重启 | [开发操作指南](./how-to/development.md) | How-to | Current |
 | 快速理解当前架构 | [架构总览](./architecture.md) | Explanation | Current |
@@ -14,6 +18,7 @@
 | 了解生命周期重入与失败恢复决策 | [ADR-0010](./adr/0010-runtime-reliability.md) | ADR | Proposed |
 | 了解应用与宿主进程的职责边界 | [ADR-0011](./adr/0011-application-host-lifecycle.md) | ADR | Proposed |
 | 了解依赖诊断与开发辅助的边界 | [ADR-0012](./adr/0012-development-lifecycle-boundaries.md) | ADR | Proposed |
+| 了解候选交付与宿主模块解析 | [ADR-0013](./adr/0013-release-contract.md) | ADR | Proposed |
 | 理解 Logger 与诊断边界 | [ADR-0005](./adr/0005-runtime-observability.md) | ADR | Accepted |
 | 了解目标架构 | [核心设计](./design.md) | Specification | Proposed |
 | 查看技术决策 | [架构决策记录](./adr/README.md) | ADR | 按条目确定 |

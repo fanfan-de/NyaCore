@@ -7,7 +7,7 @@
 ## 安装
 
 ```bash
-npm install @nya/core @nya/loader
+npm install ./vendor/nya-core-0.1.0-rc.1.tgz ./vendor/nya-loader-0.1.0-rc.1.tgz
 ```
 
 ## 基本使用
@@ -41,7 +41,29 @@ console.log(entry.state) // active
 await app.loader.remove(entry.id)
 ```
 
-不传 `resolver` 时，Loader 使用宿主原生动态 `import()`。裸包名保持原样；以 `.` 或 `/` 开头的名称会相对 Entry、最近祖先或 Loader 配置中的 `baseUrl` 解析。`baseUrl` 必须是 URL 字符串。
+当前是本地 `0.1.0-rc.1` 候选，先取得同批 `vendor/` 归档，不假设版本已发布到 npm。Core peer 为 `^0.1.0-rc.1`，不支持混用 `0.0.x` 或 `0.2.x` Core。
+
+## 加载真实文件与 npm 插件
+
+不传 `resolver` 时，显式宿主 `baseUrl` 决定相对文件和裸包的查找位置，随后由 Node 原生动态 `import()` 加载。被加载文件必须默认导出 Component，运行前先把 TypeScript 编译为 JavaScript：
+
+```ts
+const app = new Context()
+await app.installComponent(Loader, { baseUrl: import.meta.url })
+const local = await app.loader.create({ id: 'local', name: './plugins/worker.js' })
+const plugin = await app.loader.create({ id: 'plugin', name: 'your-installed-plugin' })
+// 等待已完成仍可能是 pending 或 failed，必须检查真实状态。
+console.dir({ local, plugin }, { depth: null })
+await app.fiber.dispose()
+```
+
+`your-installed-plugin` 是宿主已经安装的 npm 包占位名；完整可运行示例见仓库中的框架入门教程。包的 `exports` 需允许目标入口，采用 ESM `node` / `import` 条件，支持导出的子路径与宿主 `package.json` 的 `imports` 别名。
+
+`baseUrl` 优先采用 Entry 自身、最近祖先、Loader 配置中的值。它是绝对 `file:` URL：`import.meta.url` 表示宿主模块，`new URL('./', import.meta.url).href` 表示末尾带 `/` 的目录。查找不依赖进程当前目录；从配置文件目录构造基址时使用 Node 的 `pathToFileURL()`，为目录保留末尾 `/`。绝对文件 URL 可直接作为 name，无需基址；Windows 文件路径以及含 `#` / `%` 的文件名也应先通过 `pathToFileURL()` 编码。
+
+无 `baseUrl` 的相对名称明确失败；无基址裸包名保留 Loader 模块相对加载，不能保证找到宿主项目的插件，因此宿主应始终传基址。默认解析不自动补扩展名、不猜目录 index；文件路径遵循 Node ESM 规则。
+
+显式基址解析使用 `import-meta-resolve@4.2.0`，适用于当前支持的标准 Node ESM 环境。自定义加载钩子、自定义条件或符号链接保留等特殊策略请提供自己的 `resolver`。该解析器不清除 Node 的模块缓存，`resolve()` 仍只用于失败恢复。
 
 ## Entry 模型
 

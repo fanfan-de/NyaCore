@@ -28,7 +28,7 @@ console.dir({
 - `missing`：当前隔离地址没有服务实现。确认提供组件已经安装，并检查消费者与提供者使用的隔离标签是否一致。
 - `provider-inactive`：已知提供者尚未进入 `ACTIVE`。继续查看该提供者的状态、依赖诊断或最近失败；异步初始化尚未完成时不要把等待结束误当成就绪。
 - `implementation-unavailable`：提供方仍为 `ACTIVE`，但实现正在失效或它的来源已不可用。等待相关清理稳定，并检查提供方的依赖来源。
-- `check-false`：实现已存在，但最近一次依赖解析中 `Service.check` 返回了假值。检查服务自己的就绪条件；条件改变后需要通过已有生命周期更新或依赖刷新触发重新判断。
+- `check-false`：实现已存在，但最近一次依赖解析中 `Service.check` 返回了假值。检查服务自己的就绪条件；条件改变而实现身份不变时，调用 `fiber.refreshDependencies()`，随后 `await fiber.awaitStable()` 并检查状态。单纯 `restart()` 不重新捕获依赖。
 - `check-threw`：最近一次检查抛出了错误。按 `reason` 判断这类失败，再读取 `error`；抛出值可能就是 `undefined`，不能依赖错误值的真假。
 
 `unchecked` 表示现有依赖解析在更早的依赖处停止，还没有执行这个服务的检查。先处理已经确定的阻塞。读取诊断不会额外执行 `Service.check`，也不会自动重试组件。

@@ -1,6 +1,6 @@
 {
   "name": "@nya/playground",
-  "version": "0.0.0",
+  "version": "0.1.0-rc.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@nya/core": "*",
-    "@nya/logger-console": "*"
+    "@nya/core": "0.1.0-rc.1",
+    "@nya/logger-console": "0.1.0-rc.1"
   }
 }

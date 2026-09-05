@@ -12,6 +12,9 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { checkExample } from './check-example.mjs'
+import { checkResolverConsumer } from './check-resolver-consumer.mjs'
+import { createReleaseBundle } from './pack-release.mjs'
+import { createHash } from 'node:crypto'
 
 const repositoryRoot = resolve(import.meta.dirname, '..')
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'nya-package-check-'))
@@ -47,6 +50,9 @@ function run(command, args, cwd = repositoryRoot) {
     encoding: 'utf8',
     env: childEnvironment,
     stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 180_000,
+    maxBuffer: 8 * 1024 * 1024,
+    windowsHide: true,
   })
 }
 
@@ -82,6 +88,11 @@ try {
       packageJson.publishConfig?.access === 'public',
       `${specification.name} must publish with public access`,
     )
+    assert(packageJson.version === '0.1.0-rc.1', `${specification.name} must match the current release candidate`)
+    if (specification.name !== '@nya/core') {
+      assert(packageJson.peerDependencies?.['@nya/core'] === '^0.1.0-rc.1',
+        `${specification.name} must require the supported Core series`)
+    }
 
     const packed = JSON.parse(runNpm([
       'pack',
@@ -172,11 +183,13 @@ void entry
   })
   runNpm([
     'install',
+    '--strict-peer-deps',
     '--ignore-scripts',
     '--no-audit',
     '--no-fund',
     ...tarballs,
   ], consumerRoot)
+  runNpm(['ls', '--all', '--json'], consumerRoot)
   run(process.execPath, [
     '--input-type=module',
     '--eval',
@@ -238,8 +251,26 @@ void entry
     join(consumerRoot, 'tsconfig.json'),
   ], consumerRoot)
 
-  // 使用与分发命令相同的示例产物，不从 monorepo 源码路径运行教程。
+  // 默认 Resolver 必须面对真实宿主文件与安装的 npm 插件，而不只测试内存定义。
+  checkResolverConsumer(temporaryRoot, consumerRoot, runNpm)
+
   runNpm(['run', 'build', '--workspace', '@nya/example-task-journal'])
+  const releaseDirectory = createReleaseBundle(join(temporaryRoot, 'release-candidate'),
+    packageSpecifications.map((specification, index) => ({
+      name: specification.name, tarball: tarballs[index],
+    })))
+  const release = JSON.parse(readFileSync(join(releaseDirectory, 'RELEASE.json'), 'utf8'))
+  assert(release.version === '0.1.0-rc.1' && release.packages.length === 4,
+    'candidate manifest must identify all four RC packages')
+  for (const entry of release.packages) {
+    const digest = createHash('sha256').update(readFileSync(join(releaseDirectory, entry.path))).digest('hex')
+    assert(digest === entry.sha256, `candidate digest does not match ${entry.name}`)
+  }
+  const sums = readFileSync(join(releaseDirectory, 'SHA256SUMS'), 'utf8')
+  for (const entry of release.packages) assert(sums.includes(`${entry.sha256}  ${entry.path}`),
+    `candidate SHA256SUMS is missing ${entry.name}`)
+
+  // 使用与分发命令相同的示例产物，不从 monorepo 源码路径运行教程。
   checkExample(temporaryRoot, packageSpecifications.map((specification, index) => ({
     name: specification.name,
     tarball: tarballs[index],

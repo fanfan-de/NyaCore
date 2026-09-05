@@ -15,7 +15,6 @@ export { EventRegistry, isBailed } from './events.js'
 export type {
   DispatchMode,
   EventCallback,
-  EventHook,
   EventListener,
   EventName,
   EventOptions,
@@ -65,10 +64,6 @@ export type {
   RegistrySubscribeOptions,
 } from './registry.js'
 export { Service, ServiceRegistry } from './service.js'
-export type {
-  DependencySnapshot,
-  ServiceImplementation,
-} from './service.js'
 export type { IsolationLabel } from './symbols.js'
 export {
   contextFilter,

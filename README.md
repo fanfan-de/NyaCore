@@ -2,7 +2,7 @@
 
 Nya 是一个面向 TypeScript 的作用域组件运行时。它通过动态服务依赖决定组件何时运行，并把定时器、监听器、服务、子组件等副作用归属到明确的生命周期中，以便在依赖、配置或组件状态变化时完整撤销和重新建立运行。
 
-> 项目仍处于早期开发阶段，当前版本为 `0.0.0`。作用域运行时位于 `@nya/core`，内存加载层位于 `@nya/loader`，公共 API 尚未进入稳定兼容期。
+> 当前为 **`0.1.0-rc.1` 本地发布候选**，通过 tarball 独立安装，尚不代表已发布到 npm。稳定 `0.1.x` 补丁将维持公开类型与文档行为兼容，破坏性调整进入 `0.2`。边界见[兼容承诺](./docs/compatibility.md)，已有项目请阅读[迁移说明](./docs/how-to/migrate-0.1.md)。
 
 ## 为什么使用 Nya
 
@@ -22,6 +22,8 @@ Nya 借鉴 Cordis 的时空可组合模型，但不以兼容 Cordis 的内部实
 ## 快速开始
 
 当前仓库建议使用 Node.js 22.12 或更高版本。
+
+独立项目从[框架入门教程](./docs/tutorials/framework-basics.md)开始：安装 tarball，编写组件、提供服务、管理资源，完成配置更新与失败恢复，再检查未启动原因。教程中的完整程序会在仓库外自动编译运行。仓库内先体验已有示例：
 
 ```bash
 npm install
@@ -88,6 +90,8 @@ try {
 `logger.records()` 在每棵 Root 中保留最近 1000 条记录；`fiber.inspect()` 返回当前 run 与最近失败 run 的冻结快照。两者都只旁路观察生命周期，不会替换启动或清理抛出的原错误。
 
 ## 运行一个独立应用
+
+需要完整候选包与文档时，在仓库根目录运行 `npm run release:check`，通过后执行 `npm run release:pack`，复制生成的 `artifacts/release-candidate/`。其中 `vendor/` 提供四个包，`SHA256SUMS` / `RELEASE.json` 记录身份与摘要，`task-journal/` 是下述完整应用。
 
 [任务日志应用教程](./docs/tutorials/task-journal.md)演示文件存储服务、定时任务、配置更新、组件启停和依赖恢复，并展示如何把相同应用嵌入现有宿主。在仓库根目录生成独立目录后，可以整体复制到仓库外运行：
 
@@ -268,6 +272,8 @@ npm run check
 | `npm run check` | 依次运行文档、类型和测试检查 |
 | `npm run package:check` | 构建、打包并以外部消费者方式验证四个发布包 |
 | `npm run release:check` | 运行完整仓库检查和 npm 包发布前验证 |
+| `npm run release:pack` | 构建本地候选目录，附带四包、摘要、教程与独立应用，不发布 npm |
+| `npm run api:check` / `api:update` | 比对构建后声明基线；有意变更经过兼容审查后再更新 |
 | `npm run playground` | 构建 Core 并运行全部示例场景 |
 | `npm run example:pack` | 构建 Nya 包并生成可搬移的 `artifacts/task-journal/` 应用目录 |
 | `npm run dev:core` | 监听 Core 源码并持续构建 |
@@ -279,6 +285,8 @@ npm run check
 ## 文档
 
 - [文档地图](./docs/README.md)：文档分类、状态与权威规则；
+- [框架入门教程](./docs/tutorials/framework-basics.md)：从安装开始编写组件、服务、资源与恢复；
+- [兼容政策](./docs/compatibility.md)、[版本记录](./CHANGELOG.md)、[迁移指南](./docs/how-to/migrate-0.1.md)：候选身份、公开边界与升级步骤；
 - [任务日志应用教程](./docs/tutorials/task-journal.md)：独立安装、动态配置、组件启停与嵌入宿主；
 - [开发操作指南](./docs/how-to/development.md)：排查依赖等待、使用 Timer、构建并重启应用；
 - [架构总览](./docs/architecture.md)：系统边界、运行时视图和关键流程；

@@ -3,9 +3,11 @@
 > 状态：Current<br>
 > 类型：Explanation<br>
 > 适用范围：仓库当前已实现的 Core 运行时与基础外围包<br>
-> 对应包：`@nya/core`、`@nya/loader`、`@nya/logger-console`
+> 对应包：`@nya/core`、`@nya/loader`、`@nya/logger-console`、`@nya/timer`
 
 本文解释 Nya Core 当前代码中的核心概念、概念之间的关系，以及这些概念在生命周期中的实际行为。它面向第一次阅读代码的开发者，也可以作为编写组件时的心智模型。
+
+`0.1.0-rc.1` 以包根 exports 和发布声明表达公开边界，包内协调方法通过 `@internal` 从声明隐藏。Context 创建 Root、安装组件和管理作用域；不直接调用 Fiber 内部工厂或启动协议。Registry 等现有低层公开类型仍保留，详情见[兼容承诺](./compatibility.md)。`fiber.refreshDependencies()` 是保留的高级接口：重新捕获依赖后调用 `await fiber.awaitStable()`；单纯读取诊断或 `restart()` 不重新执行 `Service.check`。
 
 本文只把已经落地并有源码或测试支撑的行为写成“当前语义”。Core 的 Service、Inject、严格服务隔离、调用方 Context 追踪、Context intercept、单次安装覆盖、Registry 生命周期观察、Event、同步配置生命周期、Logger 和 Effect 诊断已经可用；外围包已经提供内存 Loader 与控制台 Logger。callable Service、mixin、文件配置持久化和 HMR 等能力仍属于后续设计目标，详见[核心设计](./design.md)。
 
@@ -1078,7 +1080,9 @@ Entry ID 是配置控制面的稳定身份，`fiberId` 是当前一次安装身�
 
 Entry 的 `dependencies` 投影当前 Fiber 的依赖诊断。尚无 Fiber 时该数组为空；若条目在等待父 Entry，继续通过 `blockedBy` 查询父条目，不能把空数组当成已就绪。Loader 不额外执行检查或保存独立的诊断缓存。
 
-Component Entry 通过可替换 Resolver 获得 Component；默认 Resolver 使用动态 `import()`，并只接受直接 Component 或 ESM default Component。Group Entry 不解析模块，只安装内建空 Component 来建立 Context、Fiber 和子树所有权边界。Group 上的 `intercept`、`isolate` 与 `baseUrl` 会通过 Context 或 Entry 祖先关系影响后代；这仍是运行时作用域，不是权限沙箱。
+Component Entry 通过可替换 Resolver 获得 Component；解析结果只接受直接 Component 或 ESM default Component。默认 Resolver 使用显式宿主 `file:` 基址进行 ESM 文件及 npm 包解析，再调用 Node 动态 `import()`；不清除模块缓存。Group Entry 不解析模块，只安装内建空 Component 来建立 Context、Fiber 和子树所有权边界。Group 上的 `intercept`、`isolate` 与 `baseUrl` 会通过 Context 或 Entry 祖先关系影响后代；这仍是运行时作用域，不是权限沙箱。
+
+默认 Resolver 的 `baseUrl` 可以是绝对模块 URL（如 `import.meta.url`）或末尾带 `/` 的目录 URL。相对名称与裸包名均从有效宿主基址查找；包解析采用 `node` / `import` 条件，并支持 `exports`、子路径和宿主 `imports`。绝对 URL 自身完整；无基址相对名称会失败，无基址裸包仍相对 Loader 模块加载。Node 特殊加载策略应提供自定义 Resolver。实际文件和 npm 插件由外部 tarball 消费者回归验证，详见 [Loader README](../packages/loader/README.md)。
 
 Loader 的可观察状态为：
 

@@ -2,15 +2,17 @@
 
 `@nya/core` 是 Nya 的 TypeScript 作用域组件运行时。它通过动态 Service 依赖协调 Component 生命周期，并使用 Fiber 和 Effect 管理资源所有权与清理。
 
-> 当前版本为 `0.0.0`，公共 API 尚未进入稳定兼容期。需要 Node.js 22.12 或更高版本。
+> 当前为本地 `0.1.0-rc.1` 发布候选，需要 Node.js 22.12 或更高版本。稳定 `0.1.x` 补丁将维持公开声明与文档行为兼容，破坏性调整进入 `0.2`；候选变更逐项记录迁移。请使用同批 tarball，不假设候选已经发布到 npm。
 
 ## 安装
 
 ```bash
-npm install @nya/core
+npm install ./vendor/nya-core-0.1.0-rc.1.tgz
 ```
 
 ## 基本使用
+
+仅从 `@nya/core` 包根导入。内部 Fiber 工厂、协调方法和包内 Symbol 不属于公开接口；创建根使用 `new Context()`，安装使用 `installComponent()`。`Context.services/events` 和导出的低层 Registry 类继续支持，组件作者优先用 Context 的资源托管接口。
 
 ```ts
 import { Context } from '@nya/core'

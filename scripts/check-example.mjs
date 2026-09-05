@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createExampleBundle } from './pack-example.mjs'
+import { checkTutorials } from './check-tutorials.mjs'
 
 function execute(args, directory, expected = 0, timeout = 30000) {
   const result = spawnSync(process.execPath, args, {
@@ -23,6 +24,7 @@ export function checkExample(temporaryRoot, packages, runNpm) {
   const directory = createExampleBundle(join(temporaryRoot, 'task-journal consumer'), packages)
   runNpm(['install', '--ignore-scripts', '--no-audit', '--no-fund'], directory)
   runNpm(['run', 'build'], directory)
+  checkTutorials(directory, runNpm)
   // 独立目录也必须支持开发宿主；测试在临时 fixture 中真正修改、构建和重启。
   execute(['--test', 'tests/development.test.mjs'], directory, 0, 60000)
 
