@@ -1,12 +1,13 @@
 # 版本记录
 
-本文件记录面向消费者的变化。兼容边界见[兼容承诺](./docs/compatibility.md)，升级步骤见[迁移指南](./docs/how-to/migrate-0.1.md)。
+本文件记录面向消费者的变化。兼容政策与详细迁移指南在本地 `docs/` 中维护，不随 Git 克隆提供。
 
 ## 未发布
 
+- `docs/` 改为本地维护并由 Git 忽略；仓库检查支持缺少该目录，发布候选仅附带本地存在的文档。README、CHANGELOG 与协作说明继续纳入版本控制。
 - Include 配置统一为标准 JSON：根文件和全部 include 来源仅接受 `.json`，移除 YAML 解析、注释回写与运行依赖；YAML、JSONC、注释和尾随逗号会被拒绝。
 - 多文件 JSON 挂载、来源查询、保存恢复、冲突检测和 HMR 刷新保持支持；Include/HMR 示例和实际 tarball 消费者统一使用 JSON。
-- 这是相对 `0.1.0-rc.1` 原候选的格式不兼容变更。已有 YAML 内容需转换为 JSON 并更新宿主入口和全部 include 路径，见[迁移步骤](./docs/how-to/migrate-0.1.md#6-迁移已有-yaml-配置)。
+- 这是相对 `0.1.0-rc.1` 原候选的格式不兼容变更。已有 YAML 内容需转换为 JSON 并更新宿主入口和全部 include 路径；详细步骤见本地 `docs/how-to/migrate-0.1.md`。
 
 ## 0.1.0-rc.1 — 2026-09-05
 

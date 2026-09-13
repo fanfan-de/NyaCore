@@ -2,7 +2,7 @@
 
 把 JSON 声明文件同步到 Loader 的 Entry 树。Include 管理读取、预览和保存；组件启动、依赖等待与资源清理仍由 Loader / Core 完成。
 
-需要 Node.js ≥22.12 和同批的 `@nya/core`、`@nya/loader`。候选通过本地 tarball 安装，版本与边界见[兼容政策](../../docs/compatibility.md)。
+需要 Node.js ≥22.12 和同批的 `@nya/core`、`@nya/loader`。候选通过本地 tarball 安装，版本变化见[版本记录](../../CHANGELOG.md)。
 
 ## 使用
 

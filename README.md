@@ -2,7 +2,7 @@
 
 Nya 是一个面向 TypeScript 的作用域组件运行时。它通过动态服务依赖决定组件何时运行，并把定时器、监听器、服务、子组件等副作用归属到明确的生命周期中，以便在依赖、配置或组件状态变化时完整撤销和重新建立运行。
 
-> 当前为 **`0.1.0-rc.1` 本地发布候选**，通过 tarball 独立安装，尚不代表已发布到 npm。稳定 `0.1.x` 补丁将维持公开类型与文档行为兼容，破坏性调整进入 `0.2`。边界见[兼容承诺](./docs/compatibility.md)，已有项目请阅读[迁移说明](./docs/how-to/migrate-0.1.md)。
+> 当前为 **`0.1.0-rc.1` 本地发布候选**，通过 tarball 独立安装，尚不代表已发布到 npm。稳定 `0.1.x` 补丁将维持公开类型与文档行为兼容，破坏性调整进入 `0.2`。版本变化见[版本记录](./CHANGELOG.md)。
 
 ## 为什么使用 Nya
 
@@ -23,7 +23,7 @@ Nya 借鉴 Cordis 的时空可组合模型，但不以兼容 Cordis 的内部实
 
 当前仓库建议使用 Node.js 22.12 或更高版本。
 
-独立项目从[框架入门教程](./docs/tutorials/framework-basics.md)开始：安装 tarball，编写组件、提供服务、管理资源，完成配置更新与失败恢复，再检查未启动原因。教程中的完整程序会在仓库外自动编译运行。仓库内先体验已有示例：
+独立安装步骤见下方“运行一个独立应用”和[示例说明](./examples/task-journal/README.md)。仓库内先体验已有示例：
 
 ```bash
 npm install
@@ -91,9 +91,9 @@ try {
 
 ## 运行一个独立应用
 
-需要完整候选包与文档时，在仓库根目录运行 `npm run release:check`，通过后执行 `npm run release:pack`，复制生成的 `artifacts/release-candidate/`。其中 `vendor/` 提供六个包，`SHA256SUMS` / `RELEASE.json` 记录身份与摘要，`task-journal/` 是下述完整应用，`include-hmr/` 提供配置与同进程热替换示例。
+需要候选包时，在仓库根目录运行 `npm run release:check`，通过后执行 `npm run release:pack`，复制生成的 `artifacts/release-candidate/`。其中 `vendor/` 提供六个包，`SHA256SUMS` / `RELEASE.json` 记录身份与摘要，`task-journal/` 是下述完整应用，`include-hmr/` 提供配置与同进程热替换示例。本地存在的兼容政策、迁移指南和入门教程会一并附带。
 
-[任务日志应用教程](./docs/tutorials/task-journal.md)演示文件存储服务、定时任务、配置更新、组件启停和依赖恢复，并展示如何把相同应用嵌入现有宿主。在仓库根目录生成独立目录后，可以整体复制到仓库外运行：
+[任务日志应用](./examples/task-journal/README.md)演示文件存储服务、定时任务、配置更新、组件启停和依赖恢复，并支持嵌入现有宿主。在仓库根目录生成独立目录后，可以整体复制到仓库外运行：
 
 ```bash
 npm run example:pack
@@ -239,7 +239,7 @@ console.log(worker.state) // active
 | `loader.remove()` / `resolve()` | 删除 Entry 子树或显式重试失败条目 |
 | `loader.get()` / `entries()` / `awaitIdle()` | 读取冻结快照或等待 Loader 协调稳定 |
 
-完整公共导出以 [`packages/core/src/index.ts`](./packages/core/src/index.ts) 为准；当前行为的详细说明见[核心概念指南](./docs/concepts.md)。
+完整公共导出以 [`packages/core/src/index.ts`](./packages/core/src/index.ts) 为准；当前行为可通过[核心行为测试](./packages/core/tests/)核对。
 
 ## 仓库结构
 
@@ -254,7 +254,7 @@ NyaCore/
 ├── playground/          # 可运行示例与手动验证场景
 ├── examples/task-journal/ # 可独立打包或嵌入的任务日志应用
 ├── examples/include-hmr/ # 文件配置和 HMR 开发宿主
-├── docs/                # 架构、概念、设计和 ADR
+├── docs/                # 本地架构、概念、设计和 ADR（Git 忽略，可缺省）
 ├── scripts/             # 仓库级检查脚本
 └── package.json         # npm workspaces 与统一命令入口
 ```
@@ -271,11 +271,11 @@ npm run check
 | `npm run build` | 构建六个 Nya 包和任务日志示例应用 |
 | `npm test` | 运行发布包、任务日志示例与开发宿主的测试 |
 | `npm run typecheck` | 检查发布包、测试、Playground 与任务日志示例的类型 |
-| `npm run docs:check` | 检查 Markdown 结构、代码围栏和本地链接 |
+| `npm run docs:check` | 检查仓库 Markdown；本地存在 docs/ 时一并检查其结构、围栏和链接 |
 | `npm run check` | 依次运行文档、类型和测试检查 |
 | `npm run package:check` | 构建、打包并以外部消费者方式验证六个发布包 |
 | `npm run release:check` | 运行完整仓库检查和 npm 包发布前验证 |
-| `npm run release:pack` | 构建本地候选目录，附带六包、摘要、教程与独立应用，不发布 npm |
+| `npm run release:pack` | 构建本地候选目录，附带六包、摘要、独立应用及已有本地文档，不发布 npm |
 | `npm run dev:include-hmr` | 运行 JSON 配置与同进程代码替换示例 |
 | `npm run api:check` / `api:update` | 比对构建后声明基线；有意变更经过兼容审查后再更新 |
 | `npm run playground` | 构建 Core 并运行全部示例场景 |
@@ -288,18 +288,11 @@ npm run check
 
 ## 文档
 
-- [文档地图](./docs/README.md)：文档分类、状态与权威规则；
-- [框架入门教程](./docs/tutorials/framework-basics.md)：从安装开始编写组件、服务、资源与恢复；
-- [兼容政策](./docs/compatibility.md)、[版本记录](./CHANGELOG.md)、[迁移指南](./docs/how-to/migrate-0.1.md)：候选身份、公开边界与升级步骤；
-- [任务日志应用教程](./docs/tutorials/task-journal.md)：独立安装、动态配置、组件启停与嵌入宿主；
-- [开发操作指南](./docs/how-to/development.md)：排查依赖等待、使用 Timer、构建并重启应用；
-- [架构总览](./docs/architecture.md)：系统边界、运行时视图和关键流程；
-- [核心概念](./docs/concepts.md)：有源码与测试支撑的当前行为；
-- [核心设计](./docs/design.md)：目标版本设计，其中未落地内容不能视为当前能力；
-- [架构决策记录](./docs/adr/README.md)：关键技术决策与待评审提案；
-- [文档贡献指南](./docs/contributing.md)：文档类型、维护方式与检查要求。
+`docs/` 仅在本地维护，已加入 `.gitignore`，不随 Git 克隆提供。已有本地文档从 `docs/README.md` 开始阅读，包含教程、兼容政策、迁移指南、架构、概念、目标设计和 ADR。
 
-描述当前行为时，以源码、公共导出类型和测试为直接证据。文档与实现冲突时，请按照[文档权威规则](./docs/README.md#文档权威规则)处理，不要静默选择其中一方。
+README、[版本记录](./CHANGELOG.md)、各包和示例的 README 继续纳入版本控制。`npm run docs:check` 会检查这些文件，并在本地存在 `docs/` 时一并检查。发布检查仅在对应教程存在时验证教程代码；候选目录的文档清单以实际附带文件为准。
+
+描述当前行为时，以源码、公共导出类型和测试为直接证据。本地文档与实现冲突时，应修正文档，或在变更说明中明确需要决策的约束；目标设计不能作为功能已实现的证据。
 
 ## 当前边界
 
@@ -313,7 +306,7 @@ callable Service、mixin 和异步 Standard Schema 校验仍未实现。HMR 不�
 
 ## 贡献
 
-公共 API 或可观察行为变化应同时更新测试和 `docs/concepts.md`；生命周期、依赖解析、清理顺序或作用域语义变化必须补充相应测试。新的跨模块架构决策应记录到 `docs/adr/`。
+公共 API 或可观察行为变化应同时更新测试和相关包的 README；本地存在 `docs/concepts.md` 时同步维护。生命周期、依赖解析、清理顺序或作用域语义变化必须补充相应测试。新的跨模块架构决策应在变更说明中记录，本地有 `docs/adr/` 时同步维护 ADR。
 
 提交前请运行：
 

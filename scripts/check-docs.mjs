@@ -127,7 +127,9 @@ const requiredFiles = [
   path.join(root, 'packages/hmr/README.md'),
   path.join(root, 'examples/include-hmr/README.md'),
 ]
-const files = [...requiredFiles, ...await collectMarkdown(path.join(root, 'docs'))]
+const docsDirectory = path.join(root, 'docs')
+const localDocuments = await pathExists(docsDirectory) ? await collectMarkdown(docsDirectory) : []
+const files = [...requiredFiles, ...localDocuments]
 
 for (const file of files) {
   if (!await pathExists(file)) {

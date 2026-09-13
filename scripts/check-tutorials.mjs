@@ -52,6 +52,11 @@ function extractExamples(source) {
 }
 
 export function checkTutorials(consumerRoot, runNpm) {
+  if (!existsSync(tutorialFile)) {
+    console.log('跳过本地入门教程检查：docs/tutorials/framework-basics.md 不存在')
+    return
+  }
+
   const { examples, manifest, tsconfig } = extractExamples(readFileSync(tutorialFile, 'utf8'))
   assert.equal(manifest.value?.private, true, 'tutorial package.json must be private')
   assert.equal(manifest.value?.type, 'module', 'tutorial package.json must use ESM')

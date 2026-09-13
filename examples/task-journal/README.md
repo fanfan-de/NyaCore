@@ -72,4 +72,4 @@ npm test
 
 宿主还应观察 `failure`：它以首个原始错误值 resolve，正常运行或正常关闭不会主动完成这个 Promise。嵌入者自行决定如何报告错误、何时关闭，以及是否施加启动或关闭时限。
 
-具体类型和可运行实现见 [application.ts](./src/application.ts)、[demo.ts](./src/demo.ts) 与 [main.ts](./src/main.ts)。完整学习过程见 NyaCore 仓库中的 `docs/tutorials/task-journal.md`。
+具体类型和可运行实现见 [application.ts](./src/application.ts)、[demo.ts](./src/demo.ts) 与 [main.ts](./src/main.ts)。本地存在 `docs/tutorials/task-journal.md` 时可阅读完整学习过程，该教程不随 Git 克隆提供。

@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createExampleBundle } from './pack-example.mjs'
 import { checkTutorials } from './check-tutorials.mjs'
@@ -57,17 +57,21 @@ export function checkExample(temporaryRoot, packages, runNpm) {
   assert.deepEqual(second.map(record => record.sequence), second.map((_, index) => index + 1))
 
   // 执行教程中的完整嵌入脚本，防止示例代码与教程各自演进后失配。
-  const tutorial = readFileSync(join(import.meta.dirname, '../docs/tutorials/task-journal.md'), 'utf8')
-    .replaceAll('\r\n', '\n')
-  const embedded = [...tutorial.matchAll(/```js\n([\s\S]*?)\n```/g)]
-    .map(match => match[1])
-    .filter(block => block.includes('const application = createApplication(config)'))
-  assert.equal(embedded.length, 1, 'tutorial must contain one complete embedded application script')
-  writeFileSync(join(directory, 'embedded.mjs'), `${embedded[0]}\n`)
-  execute(['embedded.mjs'], directory)
-  const embeddedRecords = readFileSync(join(directory, 'data/embedded-tasks.jsonl'), 'utf8')
-    .trim().split('\n').map(line => JSON.parse(line))
-  assert.ok(embeddedRecords.length >= 4, 'tutorial embedded script did not complete the lifecycle')
+  const tutorialFile = join(import.meta.dirname, '../docs/tutorials/task-journal.md')
+  if (existsSync(tutorialFile)) {
+    const tutorial = readFileSync(tutorialFile, 'utf8').replaceAll('\r\n', '\n')
+    const embedded = [...tutorial.matchAll(/```js\n([\s\S]*?)\n```/g)]
+      .map(match => match[1])
+      .filter(block => block.includes('const application = createApplication(config)'))
+    assert.equal(embedded.length, 1, 'tutorial must contain one complete embedded application script')
+    writeFileSync(join(directory, 'embedded.mjs'), `${embedded[0]}\n`)
+    execute(['embedded.mjs'], directory)
+    const embeddedRecords = readFileSync(join(directory, 'data/embedded-tasks.jsonl'), 'utf8')
+      .trim().split('\n').map(line => JSON.parse(line))
+    assert.ok(embeddedRecords.length >= 4, 'tutorial embedded script did not complete the lifecycle')
+  } else {
+    console.log('跳过本地嵌入教程检查：docs/tutorials/task-journal.md 不存在')
+  }
 
   execute(['dist/main.js', '--help'], directory)
   execute(['dist/main.js', '--config', 'missing-config.json'], directory, 2)
@@ -79,5 +83,5 @@ export function checkExample(temporaryRoot, packages, runNpm) {
   execute(['dist/main.js', '--config', configurationFile], directory, 1)
 
   if (process.platform !== 'win32') runNpm(['run', 'test:signals'], directory)
-  console.log('独立示例检查通过：新目录安装、编译、两次演示、嵌入教程、数据延续、配置路径与失败退出状态')
+  console.log('独立示例检查通过：新目录安装、编译、两次演示、数据延续、配置路径与失败退出状态')
 }
