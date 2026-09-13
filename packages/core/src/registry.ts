@@ -3,24 +3,11 @@
 import type { Context } from './context.js'
 import type { Disposer } from './disposable.js'
 import { Fiber, FiberState } from './fiber.js'
-import type {
-  Component,
-  ComponentInstallOptions,
-  ResolvedInject,
-  ResolvedIntercept,
-} from './component.js'
-import {
-  resolveComponent,
-  resolveInject,
-  resolveInjectIntercept,
-} from './component.js'
+import type { Component, ComponentInstallOptions, ResolvedInject, ResolvedIntercept } from './component.js'
+import { resolveComponent, resolveInject, resolveInjectIntercept } from './component.js'
 import { clearServiceCallFrame } from './service.js'
 import { withEffectDescriptor } from './diagnostics.js'
-import {
-  fiberDisposeFromOwner,
-  fiberSetOwnerDisposer,
-  registryNotifyFiberState,
-} from './symbols.js'
+import { fiberDisposeFromOwner, fiberSetOwnerDisposer, registryNotifyFiberState } from './symbols.js'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import type { FiberStopReason } from './logger.js'
 
@@ -101,9 +88,7 @@ function resolveExplicitIntercept(
 
   for (const name of Object.keys(intercept)) {
     if (name.length === 0) {
-      throw new TypeError(
-        'invalid intercept: service names must be non-empty strings',
-      )
+      throw new TypeError('invalid intercept: service names must be non-empty strings')
     }
     result.set(name, intercept[name])
   }
@@ -149,15 +134,11 @@ export class Registry {
     }
 
     const installInject = resolveInject(options.inject)
-    const installInjectIntercept = resolveInjectIntercept(
-      options.inject,
-      installInject,
-    )
+    const installInjectIntercept = resolveInjectIntercept(options.inject, installInject)
     const explicitIntercept = resolveExplicitIntercept(options.intercept)
     const inject = new Set(runtime.inject)
     for (const name of installInject) inject.add(name)
 
-    // Component Context 始终独立；每个覆盖继续不可变派生，保留配置层顺序。
     let context = parent.extend()
     for (const [name, label] of Object.entries(options.isolate ?? {})) {
       context = context.isolate(name, label)
@@ -172,8 +153,6 @@ export class Registry {
       context = context.intercept(name, value)
     }
 
-    // Service 方法中的 parent 可能是混合调用 Context。新组件拥有独立的
-    // inject 与依赖快照，不能继续沿用 Service Provider 的调用帧。
     clearServiceCallFrame(context)
     let fiber!: Fiber
     let attached = true
@@ -191,16 +170,8 @@ export class Registry {
         this.#runtimes.delete(runtime!.definition)
       }
     }
-    fiber = Fiber.component({
-      context,
-      parent: parent.fiber,
-      runtime,
-      inject,
-      config,
-      detach,
-    })
+    fiber = Fiber.component({ context, parent: parent.fiber, runtime, inject, config, detach })
 
-    // Component Context 只覆盖继承来的 Fiber，其余根级构件继续通过原型共享。
     Object.defineProperty(context, 'fiber', {
       configurable: false,
       enumerable: true,
@@ -218,7 +189,6 @@ export class Registry {
     }))
 
     try {
-      // 父 Fiber 通过一个 Effect 拥有子 Fiber，建立唯一的级联清理路径。
       const label = `ctx.installComponent(${JSON.stringify(runtime.name ?? 'anonymous')})`
       const disposeInstallation = withEffectDescriptor(
         parent.fiber,
@@ -247,7 +217,6 @@ export class Registry {
 
   /** 返回定义的只读 Runtime 快照。 */
   get<Definition extends Component<any>>(component: Definition) {
-    // 保持旧 API 对无效 Component 的校验行为。
     resolveComponent(component)
     const runtime = this.#runtimes.get(component)
     return runtime ? this.#snapshotRuntime(runtime) : undefined
@@ -267,10 +236,7 @@ export class Registry {
     })
     if (errors.length === 1) throw errors[0]
     if (errors.length > 1) {
-      throw new AggregateError(
-        errors,
-        'multiple component instances failed to dispose',
-      )
+      throw new AggregateError(errors, 'multiple component instances failed to dispose')
     }
   }
 

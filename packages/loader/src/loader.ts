@@ -1,9 +1,6 @@
 /** 本文件实现内存 Entry 树，并通过 Core 公开协议协调模块解析与 Fiber 生命周期。 */
 
-import {
-  FiberState,
-  Service,
-} from '@nya/core'
+import { FiberState, Service } from '@nya/core'
 import type {
   Component,
   ComponentInstallOptions,
@@ -14,10 +11,7 @@ import type {
   IsolationLabel,
   RegistryEvent,
 } from '@nya/core'
-import {
-  defaultLoaderResolver,
-  normalizeLoaderResolution,
-} from './resolver.js'
+import { defaultLoaderResolver, normalizeLoaderResolution } from './resolver.js'
 import type {
   DefinitionReplacement,
   EntryMutationOptions,
@@ -102,7 +96,6 @@ function uniqueCleanupErrors(errors: readonly unknown[]) {
     for (let index = result.length - 1; index >= 0; index--) {
       if (includes(error, result[index])) result.splice(index, 1)
     }
-    // 只去掉重复收集的报告，不拆解或改写用户/父 Fiber 已产生的聚合错误。
     result.push(error)
   }
   return result
@@ -181,9 +174,7 @@ function validateIsolate(
 function validateEntryValues(values: EntryValues) {
   validateString(values.id, 'entry id')
   if (values.type !== 'component' && values.type !== 'group') {
-    throw new TypeError(
-      'invalid entry type: expected "component" or "group"',
-    )
+    throw new TypeError('invalid entry type: expected "component" or "group"')
   }
   if (values.type === 'component') validateString(values.name, 'entry name')
   if (values.name !== undefined) validateString(values.name, 'entry name')
@@ -259,20 +250,14 @@ function mapFiberState(state: FiberState): EntryState {
   }
 }
 
-/** Loader 的内建 Group 只创建 Context / Fiber 所有权边界，不执行领域逻辑。 */
 export const LoaderGroup: Component.Object<unknown> = Object.freeze({
   name: 'loader-group',
   apply() {},
 })
 
-/**
- * 管理稳定 Entry 树的通用外围 Service。
- *
- * Loader 只保存内存状态；文件格式、持久化、监听与 HMR 由更上层适配器负责。
- */
+/** 管理稳定 Entry 树的通用外围 Service。 */
 export class Loader extends Service {
   static readonly provide = 'loader'
-
   private readonly host: Context
   private componentResolver: LoaderResolver
   private targetRevision = 0
@@ -362,7 +347,7 @@ export class Loader extends Service {
       const parent = this.resolveParent(record)
       record.state = record.disabled || parent.disabled ? 'disabled' : 'pending'
       record.blockedBy = record.disabled ? undefined : parent.blockedBy
-      // 生命周期暂停点只登记条目。解析和启动不得反向等待本轮清理或新服务。
+      // 生命周期重入只登记条目，避免解析和启动反向等待当前运行。
       this.schedule(record.id)
       return this.snapshot(record)
     }
@@ -371,8 +356,6 @@ export class Loader extends Service {
       await this.reconcileSubtree(record.id)
     })
 
-    // 尚未被 Loader 管理的生命周期调用也不等待全树稳定；普通外部调用
-    // 则等待本轮操作及 Registry 事件产生的后续协调。
     if (
       caller.state !== FiberState.LOADING
       && caller.state !== FiberState.UNLOADING
@@ -555,7 +538,6 @@ export class Loader extends Service {
         const cleanup = await this.disposeRecordFiber(record)
         if (!cleanup.ok) failures.push(cleanup.error)
 
-        // 已 DISPOSED 的后代不重复调用 dispose，避免再取得其缓存的拒绝。
         for (const childId of subtree.slice(1).reverse()) {
           const child = this.records.get(childId)
           if (!child?.fiber || child.fiber.state === FiberState.DISPOSED) continue
@@ -726,7 +708,6 @@ export class Loader extends Service {
       } finally {
         this.replacing = false
         this.replacementEntries.clear()
-        // 清理中断时，尚无 Fiber 的条目保持已声明目标，由后续显式恢复处理。
       }
     })
     await this.drain()
@@ -767,8 +748,7 @@ export class Loader extends Service {
   private isSelfWaiting(caller: Fiber) {
     for (let current: Fiber | null = caller; current; current = current.parent) {
       if (this.awaitingFibers.has(current.id)) return true
-      // 外部依赖失效或 Fiber.restart() 也能进入 Entry 生命周期，此时
-      // Loader 尚未等待任何 Fiber；排入 awaitIdle 等操作仍会反向等待自己。
+      // 外部依赖变化或 restart 也可能重入；此时尚未登记 awaitingFibers。
       if (
         this.fiberEntries.has(current.id)
         && (current.state === FiberState.LOADING || current.state === FiberState.UNLOADING)
@@ -799,17 +779,14 @@ export class Loader extends Service {
     fiber: Fiber,
     operation: () => Value | PromiseLike<Value>,
   ): Promise<Value> {
-    this.awaitingFibers.set(
-      fiber.id,
-      (this.awaitingFibers.get(fiber.id) ?? 0) + 1,
-    )
+    this.awaitingFibers.set(fiber.id, (this.awaitingFibers.get(fiber.id) ?? 0) + 1)
     try {
       return await operation()
     } finally {
       const count = this.awaitingFibers.get(fiber.id) ?? 1
       if (count === 1) this.awaitingFibers.delete(fiber.id)
       else this.awaitingFibers.set(fiber.id, count - 1)
-      // FAILED 事件先于 Core 完成失败诊断；稳定后再读取最终清理证据。
+      // FAILED 通知早于失败诊断完成；稳定后再读取清理证据。
       const entryId = this.fiberEntries.get(fiber.id)
       const record = entryId === undefined ? undefined : this.records.get(entryId)
       if (record && !this.disposingFibers.has(fiber.id)) this.syncFromFiber(record, fiber)
@@ -901,8 +878,7 @@ export class Loader extends Service {
     if (fiber.state !== FiberState.FAILED && fiber.state !== FiberState.DISPOSED) return
     const failure = fiber.inspect().lastFailure
     if (failure === record.acknowledgedCleanup) return
-    // 启动回滚失败的外层 phase 仍是 start；以公开的具体清理证据判别，
-    // 保留包含启动与回滚失败的完整原错误，而不阻断普通的启动失败恢复。
+    // 启动回滚失败的 phase 仍为 start，需要检查具体的清理失败阶段。
     if (failure && (
       failure.phase === 'cleanup'
       || failure.failures.some(item => item.stage === 'cleanup'
@@ -980,11 +956,7 @@ export class Loader extends Service {
         record.state = parent.disabled ? 'disabled' : 'pending'
         record.blockedBy = parent.blockedBy
       }
-      await this.blockChildren(
-        record,
-        parent.blockedBy ?? record.parentId ?? record.id,
-        parent.disabled,
-      )
+      await this.blockChildren(record, parent.blockedBy ?? record.parentId ?? record.id, parent.disabled)
       return
     }
 

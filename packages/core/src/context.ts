@@ -12,16 +12,9 @@ import type {
   EventThisArgument,
 } from './events.js'
 import { Fiber } from './fiber.js'
-import type {
-  Component,
-  ComponentInstallOptions,
-  Inject,
-} from './component.js'
+import type { Component, ComponentInstallOptions, Inject } from './component.js'
 import { Registry } from './registry.js'
-import {
-  inheritServiceCallFrame,
-  ServiceRegistry,
-} from './service.js'
+import { inheritServiceCallFrame, ServiceRegistry } from './service.js'
 import type { IsolationLabel } from './symbols.js'
 import { getContextLogger } from './logger.js'
 import type { Logger } from './logger.js'
@@ -54,10 +47,7 @@ function isSpecialProperty(property: string) {
     || property.startsWith('_')
 }
 
-/**
- * 不使用 `property in target`，因为父 Context 本身也是 Proxy，其 `has` trap
- * 会把已经认识的服务名称报告为存在。这里仅检查真正的对象属性描述符。
- */
+/** 只查真实属性描述符，避免父 Context Proxy 的 has trap 将服务误判为自身属性。 */
 function hasDefinedProperty(target: object, property: PropertyKey) {
   let current: object | null = target
   while (current) {
@@ -108,7 +98,6 @@ const contextProxyHandler: ProxyHandler<Context> = {
 
 export class Context {
   static readonly filter: typeof contextFilter = contextFilter
-
   readonly [contextMarker] = true
   /** @internal Context 派生使用的隔离地址映射。 */
   readonly [contextIsolations]!: Readonly<
@@ -129,17 +118,13 @@ export class Context {
 
   /** 创建一棵独立运行时树的根 Context；子 Context 统一通过 `extend()` 派生。 */
   constructor() {
-    // 根和派生 Context 都通过同一 handler 提供服务属性访问。root 必须指向
-    // Proxy 本身，确保所有后续派生 Context 共享同一个可观察运行时根节点。
     const proxy = new Proxy(this, contextProxyHandler) as this
     contextProxies.set(this, proxy)
 
     Object.defineProperty(this, contextIsolations, {
       configurable: false,
       enumerable: false,
-      value: Object.freeze(
-        Object.create(null) as Record<string, IsolationLabel>,
-      ),
+      value: Object.freeze(Object.create(null) as Record<string, IsolationLabel>),
       writable: false,
     })
     Object.defineProperty(this, contextIntercepts, {
@@ -149,8 +134,6 @@ export class Context {
       writable: false,
     })
 
-    // Registry 和根 Fiber 通过 Context 原型链共享；
-    // 组件 Context 只用本次安装对应的 Fiber 覆盖 `fiber` 属性。
     this.root = proxy
     this.services = new ServiceRegistry()
     this.registry = new Registry()
@@ -169,8 +152,6 @@ export class Context {
   extend(): this
   extend<T extends object>(extension: T): this & T
   extend(extension?: object): this {
-    // 派生不会再次调用构造器；通过原型派生可以保留 getter、Symbol 和后续框架扩展，
-    // 同时不需要完整复制父 Context。
     const child = Object.create(this)
 
     if (extension) {
@@ -180,10 +161,7 @@ export class Context {
         }
       }
 
-      Object.defineProperties(
-        child,
-        Object.getOwnPropertyDescriptors(extension),
-      )
+      Object.defineProperties(child, Object.getOwnPropertyDescriptors(extension))
     }
 
     const context = new Proxy(child, contextProxyHandler) as this
@@ -266,34 +244,10 @@ export class Context {
 
   /** 把一个回调安装成只在指定服务齐备时运行的轻量组件。 */
   inject(dependencies: Inject, callback: Component.Function<void>) {
-    return this.installComponent({
-      name: callback.name,
-      inject: dependencies,
-      apply: callback,
-    })
+    return this.installComponent({ name: callback.name, inject: dependencies, apply: callback })
   }
 
-  /**
-   * 创建一个归当前组件 Fiber 所有的 Effect。
-   *
-   * `setup` 会立即执行，用于创建资源或启动带副作用的业务逻辑。
-   * 它可以返回清理函数；当前组件卸载时，框架会自动调用该函数。
-   *
-   * @example
-   * ```ts
-   * context.effect(() => {
-   *   const timer = setInterval(runTask, 1000)
-   *
-   *   return () => {
-   *     clearInterval(timer)
-   *   }
-   * }, 'task timer')
-   * ```
-   *
-   * @param setup 创建资源或启动副作用的函数，返回对应的清理逻辑。
-   * @param label 可选的诊断名称，用于标识该 Effect。
-   * @returns 幂等的清理函数，可用于在组件卸载前主动清理资源。
-   */
+  /** 立即创建归当前 Fiber 所有的 Effect，返回可提前调用的幂等清理函数。 */
   effect(setup: () => CleanupSource, label?: string): Disposer {
     return this.fiber.effect(setup, label)
   }
@@ -304,12 +258,7 @@ export class Context {
     listener: EventListener<Name>,
     options?: boolean | EventOptions,
   ): Disposer {
-    return this.root.events.on(
-      this,
-      name,
-      listener as (...args: any[]) => any,
-      options,
-    )
+    return this.root.events.on(this, name, listener as (...args: any[]) => any, options)
   }
 
   /** 注册首次调用前自动移除的事件监听器。 */
@@ -318,12 +267,7 @@ export class Context {
     listener: EventListener<Name>,
     options?: boolean | EventOptions,
   ): Disposer {
-    return this.root.events.once(
-      this,
-      name,
-      listener as (...args: any[]) => any,
-      options,
-    )
+    return this.root.events.once(this, name, listener as (...args: any[]) => any, options)
   }
 
   emit<Name extends EventName>(

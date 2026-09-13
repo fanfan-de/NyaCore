@@ -1,10 +1,6 @@
 /** 把 Core 的结构化日志流显式输出到一个 Console 风格的目标。 */
 
-import type {
-  Component,
-  LogLevel,
-  LogRecord,
-} from '@nya/core'
+import type { Component, LogLevel, LogRecord } from '@nya/core'
 
 /** ConsoleLogger 使用的最小输出接口，便于浏览器、Node.js 和测试替换目标。 */
 export interface ConsoleTarget {
@@ -42,10 +38,7 @@ function formatEffectPath(effectPath: LogRecord['effectPath']): string | undefin
   return String(effectPath)
 }
 
-/**
- * 生成稳定、单行的日志前缀。结构化 data 与 Error 不在这里字符串化，
- * 而是作为独立 Console 参数传递，以保留对象检查能力和完整 stack。
- */
+/** 格式化单行前缀；data 和 Error 作为独立参数传递，保留对象检查与堆栈。 */
 function formatRecord(record: LogRecord, timestamps: boolean): string {
   const prefix = timestamps ? `${formatTimestamp(record.timestamp)} ` : ''
   const level = record.level.toUpperCase().padEnd(5, ' ')
@@ -78,10 +71,7 @@ function writeRecord(
   target[record.level](formatRecord(record, timestamps), ...details)
 }
 
-/**
- * 显式安装的控制台日志组件。导入此模块不会订阅日志或写入控制台。
- * 返回 Logger subscription disposer，使组件卸载后立即停止输出。
- */
+/** 显式安装后订阅日志，组件卸载时取消订阅。 */
 export const ConsoleLogger: Component.Function<ConsoleLoggerOptions> = (
   context,
   options = {},

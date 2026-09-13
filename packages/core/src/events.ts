@@ -7,18 +7,7 @@ import { FiberState } from './fiber.js'
 import { contextFilter } from './symbols.js'
 import { withEffectDescriptor } from './diagnostics.js'
 
-/**
- * 应用可以通过模块扩展补充事件签名：
- *
- * @example
- * ```ts
- * declare module '@nya/core' {
- *   interface Events {
- *     'record/created'(record: unknown): void
- *   }
- * }
- * ```
- */
+/** 应用可以通过模块扩展补充事件签名。 */
 export interface Events {
   /** 配置更新在提交前经过的内部可拦截调用链。 */
   'internal/update'(
@@ -28,12 +17,7 @@ export interface Events {
   ): void | Promise<void>
 }
 
-export type DispatchMode =
-  | 'emit'
-  | 'parallel'
-  | 'serial'
-  | 'bail'
-  | 'waterfall'
+export type DispatchMode = 'emit' | 'parallel' | 'serial' | 'bail' | 'waterfall'
 
 export interface EventOptions {
   /** 把监听器放到当前事件队列的开头。 */
@@ -53,14 +37,12 @@ type DeclaredEventName = Extract<keyof Events, string | symbol>
 export type EventName = {
   [Name in DeclaredEventName]: Events[Name] extends EventCallback ? Name : never
 }[DeclaredEventName]
-export type EventListener<Name extends EventName> =
-  Extract<Events[Name], EventCallback>
+export type EventListener<Name extends EventName> = Extract<Events[Name], EventCallback>
 export type EventParameters<Callback> =
   Callback extends (this: any, ...args: infer Args) => any ? Args : never
 export type EventReturn<Callback> =
   Callback extends (this: any, ...args: any[]) => infer Result ? Result : never
-export type EventThis<Callback> =
-  Callback extends (this: infer This, ...args: any[]) => any ? This : unknown
+export type EventThis<Callback> = Callback extends (this: infer This, ...args: any[]) => any ? This : unknown
 export type EventThisArgument<Callback> =
   unknown extends EventThis<Callback>
     ? object | null
@@ -77,8 +59,6 @@ function isObject(value: unknown): value is object {
 }
 
 function isThisArg(value: unknown) {
-  // 与 Cordis 的重载判定保持一致：事件名只能是 string / symbol，
-  // 因此 object、function（包括显式 null）都可无歧义地作为 thisArg。
   return typeof value === 'object' || typeof value === 'function'
 }
 
@@ -172,8 +152,7 @@ export class EventRegistry {
       }, label),
     )
 
-    // EffectScope 的清理允许异步完成。这里先同步摘除监听器，确保手动取消、
-    // once() 和监听器内部递归派发都不会在下一个微任务前再次看到旧监听器。
+    // 同步摘除监听器，避免 once 和递归派发在清理完成前再次调用它。
     return () => {
       unregister()
       return disposeEffect()
@@ -242,10 +221,7 @@ export class EventRegistry {
     }
   }
 
-  /**
-   * 以最后一个参数作为终点，把监听器组合成显式 `next()` 调用链。
-   * 监听器不调用 `next()` 即可截断后续链路。
-   */
+  /** 以最后一个参数作为终点，把监听器组合成显式 `next()` 调用链。 */
   waterfall(...input: unknown[]): unknown {
     const { thisArg, args, hooks } = this.#resolve(input)
     const fallback = args.pop()

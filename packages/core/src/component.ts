@@ -5,9 +5,7 @@ import type { IsolationLabel } from './symbols.js'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 
 /** 组件需要的服务；对象值同时声明该 Service 的调用配置。 */
-export type Inject =
-  | readonly string[]
-  | Readonly<Record<string, unknown>>
+export type Inject = readonly string[] | Readonly<Record<string, unknown>>
 
 /** Fiber 内部使用的、不会受用户后续修改影响的依赖名称集合。 */
 export type ResolvedInject = ReadonlySet<string>
@@ -34,9 +32,7 @@ export function resolveInject(inject?: Inject | null): ResolvedInject {
 
   for (const name of names) {
     if (typeof name !== 'string' || name.length === 0) {
-      throw new TypeError(
-        'invalid inject: service names must be non-empty strings',
-      )
+      throw new TypeError('invalid inject: service names must be non-empty strings')
     }
     result.add(name)
   }
@@ -93,9 +89,7 @@ export namespace Component {
   }
 
   /** Registry 保存的归一化入口引用。 */
-  export type Callback<Config = unknown> =
-    | Function<Config>
-    | Constructor<Config>
+  export type Callback<Config = unknown> = Function<Config> | Constructor<Config>
 
   /** Fiber 执行归一化入口的方式。 */
   export type Kind = 'function' | 'constructor'
@@ -123,10 +117,7 @@ export interface ResolvedComponent {
 const GeneratorFunction = function* () {}.constructor
 const AsyncGeneratorFunction = async function* () {}.constructor
 
-/**
- * 沿用 Cordis 的构造器判定：有 prototype 的普通函数按构造器执行，
- * 箭头函数、async 函数、生成器和异步生成器按函数执行。
- */
+/** 有 prototype 的普通函数按构造器执行；生成器、async 函数和箭头函数按函数执行。 */
 function isConstructor(
   callback: Component.Callback<any>,
 ): callback is Component.Constructor<any> {
@@ -145,8 +136,6 @@ export function resolveComponent(
 ): ResolvedComponent {
   let callback: Component.Callback<any> | undefined
 
-  // 与 Cordis 一样，直接函数 / class 以自身为入口，对象则以 apply 为入口。
-  // getter 或 Proxy 在读取 apply 时也可能抛错，此时统一按无效定义处理。
   try {
     if (typeof component === 'function') {
       callback = component
@@ -157,9 +146,7 @@ export function resolveComponent(
   } catch {}
 
   if (!callback) {
-    throw new TypeError(
-      'invalid component: expected a function, class, or object with an apply method',
-    )
+    throw new TypeError('invalid component: expected a function, class, or object with an apply method')
   }
 
   const componentName = component.name

@@ -19,12 +19,7 @@ export type LogEventCode =
   | 'effect/cleanup-failed'
   | 'logger/sink-failed'
 
-export type LifecyclePhase =
-  | 'config'
-  | 'start'
-  | 'active'
-  | 'cleanup'
-  | 'dispose'
+export type LifecyclePhase = 'config' | 'start' | 'active' | 'cleanup' | 'dispose'
 
 export type FiberStopReason =
   | 'dependency-change'
@@ -280,9 +275,7 @@ class ContextLogger implements Logger {
       message = messageOrError instanceof Error
         ? messageOrError.message
         : String(messageOrError)
-    } catch {
-      // error(unknown) 必须能记录任意抛出值，包括带有异常 toString 的对象。
-    }
+    } catch {}
     try {
       getHub(this.context).publish(
         this.context,
@@ -292,9 +285,7 @@ class ContextLogger implements Logger {
         message,
         { error: messageOrError },
       )
-    } catch {
-      // Logger 是观察旁路，不能让记录失败进入组件生命周期。
-    }
+    } catch {}
   }
 
   records() {
@@ -310,9 +301,7 @@ class ContextLogger implements Logger {
     const onFailure = () => {
       // replay 可能在 effect() 返回前失败；手动清理的日志也可能重入这里。
       // 先由 Hub 同步停用 sink，再等当前调用完成后释放所属 Effect。
-      void Promise.resolve().then(() => disposeEffect?.()).catch(() => {
-        // 自动清理是观察旁路；原 disposer 仍向主动等待者保留清理错误。
-      })
+      void Promise.resolve().then(() => disposeEffect?.()).catch(() => {})
     }
     disposeEffect = withEffectDescriptor(
       this.context.fiber,
@@ -329,14 +318,7 @@ class ContextLogger implements Logger {
     if (typeof message !== 'string') {
       throw new TypeError('invalid log message: expected a string')
     }
-    getHub(this.context).publish(
-      this.context,
-      this.name,
-      level,
-      'log',
-      message,
-      { data },
-    )
+    getHub(this.context).publish(this.context, this.name, level, 'log', message, { data })
   }
 }
 
@@ -359,15 +341,6 @@ export function logRuntime(
   details: RuntimeLogDetails = {},
 ) {
   try {
-    getHub(context).publish(
-      context,
-      context.fiber.name,
-      level,
-      code,
-      message,
-      details,
-    )
-  } catch {
-    // 日志是观察旁路，不能改变被观察对象的语义。
-  }
+    getHub(context).publish(context, context.fiber.name, level, code, message, details)
+  } catch {}
 }

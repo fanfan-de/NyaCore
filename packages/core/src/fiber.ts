@@ -19,20 +19,10 @@ import {
   serviceSubscribe,
 } from './symbols.js'
 import { resolveConfig } from './config.js'
-import {
-  consumeEffectDescriptor,
-  FiberDiagnostics,
-  withEffectDescriptor,
-} from './diagnostics.js'
-import type {
-  EffectDiagnosticHandle,
-  FiberDiagnosticSnapshot,
-} from './diagnostics.js'
+import { consumeEffectDescriptor, FiberDiagnostics, withEffectDescriptor } from './diagnostics.js'
+import type { EffectDiagnosticHandle, FiberDiagnosticSnapshot } from './diagnostics.js'
 import { logRuntime } from './logger.js'
-import type {
-  FiberStopReason,
-  LifecyclePhase,
-} from './logger.js'
+import type { FiberStopReason, LifecyclePhase } from './logger.js'
 
 let fiberCounter = 0
 
@@ -107,13 +97,9 @@ export class Fiber implements PromiseLike<void> {
   readonly context: Context
   readonly parent: Fiber | null
   readonly inject: ResolvedInject
-
   #state: FiberState
   #stateSince = new Date().toISOString()
   #error: unknown
-
-  // ---------- 组件实例与安装输入 ----------
-
   #runtime: ComponentRuntimeInternal | null
   #configInput: unknown
   #config: unknown
@@ -123,22 +109,10 @@ export class Fiber implements PromiseLike<void> {
   #updateRequest = 0
   #latestUpdateOperation: Promise<void> = Promise.resolve()
   #detach: (() => void) | undefined
-
-  /** start() 后建立、最终 dispose() 时撤销的服务依赖反向订阅。 */
   #unsubscribe: Disposer | undefined
-
-  // ---------- 单轮运行与服务快照 ----------
-
-  /** 当前一轮运行独占的 Effect 栈；依赖变化后会销毁并替换为新栈。 */
   #runEffects: DisposableStack | undefined
-
-  /** 必须先于本轮任何 Effect 清理完成的内部失效工作。 */
   #beforeUnload: Set<BeforeUnloadHook> | undefined
-
-  /** 服务注册表最近计算出的目标快照；undefined 表示至少缺少一个依赖。 */
   #desiredSnapshot: DependencySnapshot | undefined
-
-  /** 仅保存最近一次捕获中实际执行的 check 结果，不持有实现或 Provider。 */
   #dependencyChecks = new Map<string, DependencyCheckObservation>()
 
   /** 组件入口和清理代码当前固定使用的快照。 */
@@ -148,37 +122,22 @@ export class Fiber implements PromiseLike<void> {
   #runCounter = 0
   #activeRun: number | undefined
   #diagnosticRun: number | undefined
-
-  /** 当前运行固定使用的配置版本；入口闭包持有对应的配置值。 */
   #activeConfigVersion: number | undefined
-
-  /** 同一服务与配置目标启动失败后不空转重试；目标变化后才重新尝试。 */
   #failedTarget: string | undefined
 
   /** 清理失败后阻止自动通知启动新运行，直到显式 update 或 restart。 */
   #cleanupBlocked = false
-
   #currentScope: EffectScope | undefined
   #currentDiagnostic: EffectDiagnosticHandle | undefined
   #startupScopes: EffectScope[] | undefined
-
-  /** 诊断状态完全旁路于真正的 DisposableStack。 */
   #diagnostics = new FiberDiagnostics()
   #pendingStopReason: FiberStopReason | undefined
   #lastCleanupReason: FiberStopReason | undefined
   #disposeReason: FiberStopReason | undefined
-
-  // ---------- 生命周期任务串行化 ----------
-
   #currentOperation = Promise.resolve()
   #reconcileOperation: Promise<void> | undefined
-
   #disposeOperation: Promise<void> | undefined
-
-  /** 普通组件由父 Fiber 的安装 Effect 所有；主动销毁要先摘除该 Effect。 */
   #ownerDisposer: Disposer | undefined
-
-  /** dispose() 已登记后发生的清理错误，最终在完成永久卸载后统一抛出。 */
   #disposeErrors: unknown[] | undefined
 
   private constructor(options: {
@@ -197,7 +156,6 @@ export class Fiber implements PromiseLike<void> {
     this.#detach = options.detach
     this.#state = options.runtime ? FiberState.PENDING : FiberState.ACTIVE
 
-    // 根 Fiber 本身始终是一轮可写运行；普通 Fiber 要等依赖满足后再创建栈。
     if (!options.runtime) {
       this.#runEffects = new DisposableStack()
       this.#beforeUnload = new Set()
@@ -300,11 +258,7 @@ export class Fiber implements PromiseLike<void> {
     }
 
     const checks = new Map<string, DependencyCheckObservation>()
-    this.#desiredSnapshot = this.context.root.services[serviceCapture](
-      this.context,
-      this.inject,
-      checks,
-    )
+    this.#desiredSnapshot = this.context.root.services[serviceCapture](this.context, this.inject, checks)
     this.#dependencyChecks = checks
     this.#scheduleReconcile()
   }
@@ -325,9 +279,7 @@ export class Fiber implements PromiseLike<void> {
       || implementation.address.name !== address.name
       || implementation.address.label !== address.label
     ) {
-      throw new Error(
-        `cannot get required service "${name}" in inactive context`,
-      )
+      throw new Error(`cannot get required service "${name}" in inactive context`)
     }
 
     return implementation
@@ -549,7 +501,7 @@ export class Fiber implements PromiseLike<void> {
     }
     const request = ++this.#updateRequest
     const operation = (async () => {
-      // 让同一调用栈内的连续 update() 先登记请求序号，再进入扩展链。
+      // 同一调用栈的更新先登记请求序号，再进入扩展链。
       await Promise.resolve()
       let commitOperation: Promise<void> | undefined
       await this.context.waterfall(
@@ -560,15 +512,13 @@ export class Fiber implements PromiseLike<void> {
           return commitOperation ??= this.#commitConfig(resolved, request)
         },
       )
-      // 即使同步监听器调用 next() 时没有 return / await，update() 仍等待
-      // 已经进入默认终点的配置完成生命周期收敛。
+      // next() 未被监听器返回时，仍需等待已经启动的提交。
       await commitOperation
     })()
     this.#latestUpdateOperation = operation
     await operation
 
-    // 较早的 update() 也要等调用期间出现的最新请求完成，但不继承
-    // 后继请求自己的扩展链错误；该错误只由对应的 update() 暴露。
+    // 等待最新请求收敛，但不继承后继请求自己的扩展链错误。
     while (operation !== this.#latestUpdateOperation) {
       const latest = this.#latestUpdateOperation
       await latest.catch(() => {})
@@ -588,10 +538,7 @@ export class Fiber implements PromiseLike<void> {
 
     if (this.#hasConfigError) {
       try {
-        this.#config = resolveConfig(
-          this.#runtime?.Config,
-          this.#configInput,
-        )
+        this.#config = resolveConfig(this.#runtime?.Config, this.#configInput)
         this.#configInput = undefined
         this.#hasConfigError = false
         this.#configError = undefined
@@ -650,12 +597,11 @@ export class Fiber implements PromiseLike<void> {
       try {
         await operation
       } catch (error) {
-        // 旧操作失败后若已经排入了更新 epoch 的恢复操作，就继续等最新操作。
         if (operation === this.#currentOperation) throw error
         continue
       }
 
-      // 给同一轮状态通知一个微任务机会，避免刚稳定就漏掉紧随其后的刷新。
+      // 让状态通知产生的后续协调先入队。
       await Promise.resolve()
       if (operation === this.#currentOperation) return
     }
@@ -714,7 +660,6 @@ export class Fiber implements PromiseLike<void> {
       && this.state === FiberState.ACTIVE
   }
 
-  /** 收敛到最新快照：旧运行必须先卸载，缺依赖时停在 PENDING。 */
   async #reconcile() {
     while (!this.#disposeOperation) {
       if (this.#hasConfigError) {
@@ -772,11 +717,7 @@ export class Fiber implements PromiseLike<void> {
       }
 
       try {
-        await this.#startRun(
-          desired,
-          this.#configVersion,
-          this.#config,
-        )
+        await this.#startRun(desired, this.#configVersion, this.#config)
       } catch (error) {
         // 过期启动在内部卸载时也可能清理失败；此时不能静默启动新目标。
         if (this.state !== FiberState.FAILED) {
@@ -870,7 +811,6 @@ export class Fiber implements PromiseLike<void> {
     this.#setState(FiberState.ACTIVE)
   }
 
-  /** 只撤销当前运行；保留 Fiber、Runtime 登记和依赖订阅以便再次激活。 */
   async #unloadRun(stopReason: FiberStopReason) {
     if (!this.#runEffects && !this.#activeSnapshot && !this.#beforeUnload) {
       return
@@ -883,7 +823,7 @@ export class Fiber implements PromiseLike<void> {
       await this.#disposeRunEffects()
       succeeded = true
     } finally {
-      // 清理函数执行期间仍能读取旧 snapshot；全部清理结束后才解除固定。
+      // 旧依赖快照必须保留到全部清理完成。
       this.#runEffects = undefined
       this.#beforeUnload = undefined
       this.#activeSnapshot = undefined
@@ -929,7 +869,6 @@ export class Fiber implements PromiseLike<void> {
       this.#failedTarget = undefined
 
       if (this.isRoot) {
-        // 根 Fiber 的 dispose 只清空整棵资源树，根 Context 之后仍可复用。
         this.#runEffects = new DisposableStack()
         if (!cleanupFailed) this.#diagnostics.clearRun()
         this.#beforeUnload = new Set()
@@ -978,7 +917,7 @@ export class Fiber implements PromiseLike<void> {
     }
   }
 
-  /** 先完成依赖失效，再清理 Effect；任一阶段失败都不跳过另一阶段。 */
+  /** 先完成服务失效和消费者清理，再清理普通 Effect；失败不跳过后续阶段。 */
   async #disposeRunEffects() {
     const errors: unknown[] = []
     const hooks = [...this.#beforeUnload ?? []]
@@ -1054,11 +993,7 @@ export class Fiber implements PromiseLike<void> {
     this.#state = state
     this.#stateSince = new Date().toISOString()
     this.context.root.services.onFiberStateChange(this, oldState, state)
-    this.context.root.registry[registryNotifyFiberState](
-      this,
-      oldState,
-      stopReason,
-    )
+    this.context.root.registry[registryNotifyFiberState](this, oldState, stopReason)
     const phase: LifecyclePhase = state === FiberState.LOADING
       ? 'start'
       : state === FiberState.ACTIVE
@@ -1108,12 +1043,7 @@ export class Fiber implements PromiseLike<void> {
     error: unknown,
     stopReason?: FiberStopReason,
   ) {
-    this.#diagnostics.captureFailure(
-      this,
-      phase,
-      error,
-      stopReason,
-    )
+    this.#diagnostics.captureFailure(this, phase, error, stopReason)
     const effectPaths = this.#diagnostics.effectPaths()
     const code = phase === 'config'
       ? 'fiber/config-failed'

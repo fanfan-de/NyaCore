@@ -97,18 +97,9 @@ interface ServiceImplementationState {
 }
 
 const serviceCallFrames = new WeakMap<Context, ServiceCallFrame>()
-const serviceFacades = new WeakMap<
-  ServiceImplementation,
-  WeakMap<Context, Service>
->()
-const serviceFacadeImplementations = new WeakMap<
-  Service,
-  ServiceImplementation<Service>
->()
-const serviceImplementationStates = new WeakMap<
-  ServiceImplementation,
-  ServiceImplementationState
->()
+const serviceFacades = new WeakMap<ServiceImplementation, WeakMap<Context, Service>>()
+const serviceFacadeImplementations = new WeakMap<Service, ServiceImplementation<Service>>()
+const serviceImplementationStates = new WeakMap<ServiceImplementation, ServiceImplementationState>()
 
 function assertServiceFacadeReadable(implementation: ServiceImplementation) {
   if (!serviceImplementationStates.get(implementation)?.readable) {
@@ -136,10 +127,7 @@ function canReuseProviderValue(
 export function inheritServiceCallFrame(parent: Context, child: Context) {
   const frame = serviceCallFrames.get(parent)
   if (!frame) return
-  serviceCallFrames.set(child, {
-    ...frame,
-    callerContext: child,
-  })
+  serviceCallFrames.set(child, { ...frame, callerContext: child })
 }
 
 /** 安装独立组件时清除从调用方 Context 复制来的服务调用帧。 */
@@ -172,8 +160,6 @@ function bindServiceImplementation(
 ) {
   const value = implementation.value
   if (!(value instanceof Service)) return value
-  // 精确 Provider Context 只为实例自己的规范名称复用原对象。若同一实例
-  // 另以 alias 或其他隔离地址注册，仍需 facade 携带真实地址供事件过滤。
   if (canReuseProviderValue(callerContext, implementation)) return value
 
   let callers = serviceFacades.get(implementation)
@@ -194,9 +180,7 @@ function bindServiceImplementation(
 
   const contextDescriptor = Reflect.getOwnPropertyDescriptor(value, 'ctx')
   if (!contextDescriptor || !contextDescriptor.configurable) {
-    throw new TypeError(
-      'cannot bind a Service whose Context property is not configurable',
-    )
+    throw new TypeError('cannot bind a Service whose Context property is not configurable')
   }
 
   const methods = new WeakMap<Function, Function>()
@@ -274,19 +258,12 @@ function bindServiceImplementation(
       return Reflect.setPrototypeOf(target, prototype)
     },
   })
-  serviceFacadeImplementations.set(
-    facade,
-    implementation as ServiceImplementation<Service>,
-  )
+  serviceFacadeImplementations.set(facade, implementation as ServiceImplementation<Service>)
   callers.set(callerContext, facade)
   return facade
 }
 
-/**
- * 根 Context 共享的服务注册表。
- *
- * 同名服务按 Context 解析出的隔离标签分配独立 slot。
- */
+/** 根 Context 共享的服务注册表。 */
 export class ServiceRegistry {
   #counter = 0
   #defaultLabels = new Map<string, IsolationLabel>()
@@ -294,7 +271,6 @@ export class ServiceRegistry {
   #owned = new Map<Fiber, Set<ServiceSlot>>()
   #declared = new Map<string, Map<IsolationLabel, Set<Fiber>>>()
 
-  /** 只识别 Service 子类的静态数据声明，不执行 getter 或普通组件入口。 */
   #subscribeDeclaration(context: Context, fiber: Fiber, callback?: Component.Callback<any>) {
     if (typeof callback !== 'function') return
     let name: unknown
@@ -311,7 +287,6 @@ export class ServiceRegistry {
         constructor = Reflect.getPrototypeOf(constructor)
       }
     } catch {
-      // 诊断元数据无法读取时视为未声明，不能改变组件安装结果。
       return
     }
     if (typeof name !== 'string' || name.length === 0) return
@@ -328,7 +303,6 @@ export class ServiceRegistry {
     }
   }
 
-  /** 把一个 Context 中的服务名解析为 Root 内唯一的严格地址。 */
   #resolveAddress(context: Context, name: string): ServiceAddress {
     if (context.root.services !== this) {
       throw new Error('cannot resolve a service from another Context tree')
@@ -349,7 +323,6 @@ export class ServiceRegistry {
     return { name, label }
   }
 
-  /** 返回当前 Context 中服务名称对应的稳定 slot。 */
   #getSlot(context: Context, name: string) {
     const address = this.#resolveAddress(context, name)
     let labels = this.#slots.get(name)
@@ -369,7 +342,6 @@ export class ServiceRegistry {
     return slot
   }
 
-  /** 把嵌套 Service 调用归一化为创建最外层实现时固定的 Provider run。 */
   #getDependencySource(context: Context): ServiceDependencySource {
     const frame = serviceCallFrames.get(context)
     if (frame) {
@@ -389,7 +361,6 @@ export class ServiceRegistry {
     return { context, ...source }
   }
 
-  /** Provider run 是否仍是创建实现时的同一轮运行。 */
   #isSourceCurrent(source: ServiceDependencySource, loading = false) {
     const fiber = source.context.fiber
     if (fiber.isRoot) return fiber.state === FiberState.ACTIVE
@@ -405,7 +376,6 @@ export class ServiceRegistry {
       && current.snapshot === source.snapshot
   }
 
-  /** 普通消费者与 Root 实时读取只能观察仍有效的实现。 */
   #isImplementationAvailable(implementation: ServiceImplementation) {
     if (implementation.owner.state !== FiberState.ACTIVE) return false
     const state = serviceImplementationStates.get(implementation)
@@ -436,10 +406,7 @@ export class ServiceRegistry {
       })
       if (errors.length === 1) throw errors[0]
       if (errors.length > 1) {
-        throw new AggregateError(
-          errors,
-          'multiple service consumers failed to unload',
-        )
+        throw new AggregateError(errors, 'multiple service consumers failed to unload')
       }
     })()
     state.invalidationTask = task
@@ -447,7 +414,7 @@ export class ServiceRegistry {
     return task
   }
 
-  /** 第二阶段：所有消费者稳定后关闭 frame，并解除 slot 与两端 hook。 */
+  /** 消费者稳定后关闭 facade，再解除服务注册与两端 hook。 */
   #finalizeInvalidation(
     slot: ServiceSlot,
     implementation: ServiceImplementation,
@@ -476,8 +443,7 @@ export class ServiceRegistry {
       await state.detachSource?.()
       await state.detachOwner?.()
 
-      // 跨所有者注册不会随来源 Fiber 自动清理；关闭 slot 后主动结束
-      // caller-owned 注册 Effect，释放闭包但不清理 caller 的其他资源。
+      // 来源卸载时主动注销跨 owner 的服务 Effect，保留调用方其他资源。
       if (crossOwner && !state.ownerDisposing) {
         await state.disposeOwner?.()
       }
@@ -487,7 +453,6 @@ export class ServiceRegistry {
     return task
   }
 
-  /** 按实现身份移除 slot，并从 owner 反向索引解除，不误删后继实现。 */
   #removeImplementation(
     slot: ServiceSlot,
     implementation: ServiceImplementation,
@@ -516,10 +481,7 @@ export class ServiceRegistry {
     return this.#slots.get(name)?.has(address.label) ?? false
   }
 
-  /**
-   * 注册服务，并把注册行为放入提供方 Fiber 当前运行的 Effect 树。
-   * 返回的 disposer 可主动移除服务，同时仍然保证幂等。
-   */
+  /** 注册服务，并把注册行为放入提供方 Fiber 当前运行的 Effect 树。 */
   provide<Value>(
     context: Context,
     name: string,
@@ -551,9 +513,7 @@ export class ServiceRegistry {
         const owner = current.owner.name === '<root>'
           ? '<root>'
           : `<${current.owner.name}>`
-        throw new Error(
-          `service "${name}" has been registered at ${owner}`,
-        )
+        throw new Error(`service "${name}" has been registered at ${owner}`)
       }
 
       const implementation: ServiceImplementation<Value> = {
@@ -582,34 +542,18 @@ export class ServiceRegistry {
 
       // source 与实际 owner 都保存同一两阶段 barrier。任一端先卸载都会
       // 等待消费者，另一端并发卸载时复用同一任务，不依赖 Effect LIFO。
-      const invalidate = () => this.#beginInvalidation(
-        slot,
-        implementation,
-        state!,
-      )
-      const finalize = () => this.#finalizeInvalidation(
-        slot,
-        implementation,
-        state!,
-      )
+      const invalidate = () => this.#beginInvalidation(slot, implementation, state!)
+      const finalize = () => this.#finalizeInvalidation(slot, implementation, state!)
       const hookMetadata = {
         label,
         serviceName: name,
         ownerFiberId: context.fiber.id,
         sourceFiberId: source.context.fiber.id,
       }
-      state.detachSource = source.context.fiber[fiberBeforeUnload](
-        invalidate,
-        finalize,
-        hookMetadata,
-      )
+      state.detachSource = source.context.fiber[fiberBeforeUnload](invalidate, finalize, hookMetadata)
       if (source.context.fiber !== context.fiber) {
         try {
-          state.detachOwner = context.fiber[fiberBeforeUnload](
-            invalidate,
-            finalize,
-            hookMetadata,
-          )
+          state.detachOwner = context.fiber[fiberBeforeUnload](invalidate, finalize, hookMetadata)
         } catch (error) {
           state.detachSource()
           throw error
@@ -624,8 +568,7 @@ export class ServiceRegistry {
       }
       owned.add(slot)
 
-      // 根 Fiber 等已经 ACTIVE 的提供方可以立即唤醒消费者；普通组件在
-      // LOADING 阶段注册的服务要等到其状态真正进入 ACTIVE 后才会通知。
+      // LOADING 中的提供者须等 ACTIVE 后才能唤醒消费者。
       if (context.fiber.state === FiberState.ACTIVE) {
         this.#notify(slot)
       }
@@ -643,11 +586,7 @@ export class ServiceRegistry {
 
         state!.valid = false
 
-        const consumers = this.#removeImplementation(
-          slot,
-          implementation,
-          true,
-        )
+        const consumers = this.#removeImplementation(slot, implementation, true)
         const results = await Promise.allSettled(
           consumers.map(fiber => fiber.awaitStable()),
         )
@@ -671,10 +610,7 @@ export class ServiceRegistry {
         })
         if (errors.length === 1) throw errors[0]
         if (errors.length > 1) {
-          throw new AggregateError(
-            errors,
-            'multiple service consumers failed to unload',
-          )
+          throw new AggregateError(errors, 'multiple service consumers failed to unload')
         }
       }
       }, label),
@@ -707,11 +643,7 @@ export class ServiceRegistry {
 
         if (state && registeredSlot && registeredImplementation) {
           try {
-            await this.#finalizeInvalidation(
-              registeredSlot,
-              registeredImplementation,
-              state,
-            )
+            await this.#finalizeInvalidation(registeredSlot, registeredImplementation, state)
           } catch (error) {
             finalizationFailure = error
           }
@@ -732,10 +664,7 @@ export class ServiceRegistry {
         }
         if (failures.length === 1) throw failures[0]
         if (failures.length > 1) {
-          throw new AggregateError(
-            failures,
-            'service removal phases failed',
-          )
+          throw new AggregateError(failures, 'service removal phases failed')
         }
       })()
       void publicDisposeTask.catch(() => {})
@@ -889,9 +818,7 @@ export class ServiceRegistry {
     if (frame) {
       const state = serviceImplementationStates.get(frame.implementation)
       if (!state?.readable) {
-        throw new Error(
-          `cannot get required service "${name}" in inactive context`,
-        )
+        throw new Error(`cannot get required service "${name}" in inactive context`)
       }
       const source = state.source
       let implementation: ServiceImplementation | undefined
@@ -924,8 +851,6 @@ export class ServiceRegistry {
     const slot = this.#getSlot(context, name)
     const implementation = slot.implementation
 
-    // 同一 Provider Fiber 可以在构造、初始化和清理期间读取自己的服务。
-    // 精确提供 Context 复用原实例，其他派生 Context 仍获得独立 caller facade。
     if (implementation?.owner === context.fiber) {
       if (canReuseProviderValue(context, implementation)) {
         return implementation.value
@@ -944,11 +869,7 @@ export class ServiceRegistry {
     const { snapshot } = context.fiber[fiberGetServiceSource]()
     return bindServiceImplementation(
       context,
-      context.fiber[fiberGetServiceImplementation](
-        name,
-        slot.address,
-        snapshot,
-      ),
+      context.fiber[fiberGetServiceImplementation](name, slot.address, snapshot),
     )
   }
 
@@ -970,10 +891,7 @@ export class ServiceRegistry {
   }
 }
 
-/**
- * 把 class 实例注册成服务，并让消费者通过绑定调用方 Context 的 facade 使用它。
- * callable、extend 和 mixin 仍属于后续协议。
- */
+/** 把 class 实例注册成服务，并让消费者通过绑定调用方 Context 的 facade 使用它。 */
 export abstract class Service<Config = unknown> {
   static readonly init: typeof serviceInit = serviceInit
   static readonly check: typeof serviceCheck = serviceCheck
@@ -982,9 +900,7 @@ export abstract class Service<Config = unknown> {
     serviceResolveConfig
   static readonly mergeConfig: typeof serviceMergeConfig = serviceMergeConfig
   static provide?: string
-
   declare readonly [serviceConfig]: Config
-
   readonly name: string
 
   constructor(protected readonly ctx: Context, name?: string) {
@@ -1023,10 +939,7 @@ export abstract class Service<Config = unknown> {
     let intercepts: object | null = this.ctx[contextIntercepts]
     const inherited: Config[] = []
     while (intercepts) {
-      const descriptor = Reflect.getOwnPropertyDescriptor(
-        intercepts,
-        this.name,
-      )
+      const descriptor = Reflect.getOwnPropertyDescriptor(intercepts, this.name)
       if (descriptor && 'value' in descriptor) {
         inherited.unshift(descriptor.value as Config)
       }

@@ -1,22 +1,12 @@
 /** 本文件定义 Loader 的公开 Entry、解析器、状态与配置协议。 */
 
-import type {
-  Component,
-  FiberDiagnosticSnapshot,
-  Inject,
-  IsolationLabel,
-} from '@nya/core'
+import type { Component, FiberDiagnosticSnapshot, Inject, IsolationLabel } from '@nya/core'
 
 export type Awaitable<Value> = Value | PromiseLike<Value>
 
 export type EntryType = 'component' | 'group'
 
-export type EntryState =
-  | 'disabled'
-  | 'resolving'
-  | 'pending'
-  | 'active'
-  | 'failed'
+export type EntryState = 'disabled' | 'resolving' | 'pending' | 'active' | 'failed'
 
 interface EntryInputBase {
   /** Loader 树中稳定且唯一的身份，不等同于 Fiber ID。 */
@@ -94,9 +84,7 @@ export type LoaderResolution =
   | Component<any>
   | Readonly<{ default: Component<any> }>
 
-export type LoaderResolver = (
-  request: LoaderResolveRequest,
-) => Awaitable<LoaderResolution>
+export type LoaderResolver = (request: LoaderResolveRequest) => Awaitable<LoaderResolution>
 
 export interface LoaderConfig {
   /** 默认使用动态 import；测试、注册表和宿主环境可以提供自己的解析器。 */

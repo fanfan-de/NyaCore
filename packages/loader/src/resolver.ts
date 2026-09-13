@@ -2,10 +2,7 @@
 
 import type { Component } from '@nya/core'
 import { resolve as resolveEsm } from 'import-meta-resolve'
-import type {
-  LoaderResolution,
-  LoaderResolver,
-} from './types.js'
+import type { LoaderResolution, LoaderResolver } from './types.js'
 
 function isComponent(value: unknown): value is Component<any> {
   if (typeof value === 'function') return true
@@ -19,7 +16,6 @@ function isComponent(value: unknown): value is Component<any> {
 }
 
 function resolveSpecifier(name: string, baseUrl?: string) {
-  // 绝对 URL 自身完整，不依赖宿主基址，也不把编码后的文件名当作文件路径处理。
   try { return new URL(name).href } catch {}
 
   if (baseUrl === undefined) {
@@ -39,12 +35,12 @@ function resolveSpecifier(name: string, baseUrl?: string) {
   if (parent.protocol !== 'file:') {
     throw new TypeError('default loader resolver baseUrl must be an absolute file: URL')
   }
-  // package imports / self resolution 需要模块 URL；目录基址使用同目录的虚拟模块。
+  // package imports 与 self resolution 需要模块 URL；目录基址使用虚拟模块。
   if (parent.pathname.endsWith('/')) parent = new URL('__nya_loader_resolver__.mjs', parent)
   return resolveEsm(name, parent.href)
 }
 
-/** 按显式宿主基址执行 ESM 解析，再由原生动态 import 加载；不实施热重载。 */
+/** 按宿主基址解析 ESM 后导入；模块缓存由 Node 管理。 */
 export const defaultLoaderResolver: LoaderResolver = async request => {
   return import(resolveSpecifier(request.name, request.baseUrl))
 }
@@ -61,7 +57,5 @@ export function normalizeLoaderResolution(
   } catch {}
   if (isComponent(candidate)) return candidate
 
-  throw new TypeError(
-    'invalid loader resolution: expected a Component or a default Component export',
-  )
+  throw new TypeError('invalid loader resolution: expected a Component or a default Component export')
 }

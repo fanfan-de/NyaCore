@@ -1,10 +1,7 @@
 /** 本文件维护 Fiber/Effect 的只读诊断镜像，不参与资源所有权与清理顺序。 */
 
 import type { FiberState } from './fiber.js'
-import type {
-  FiberStopReason,
-  LifecyclePhase,
-} from './logger.js'
+import type { FiberStopReason, LifecyclePhase } from './logger.js'
 
 export type EffectDiagnosticType =
   | 'custom'
@@ -22,11 +19,7 @@ export type EffectDiagnosticState =
   | 'setup-failed'
   | 'cleanup-failed'
 
-export type EffectFailureStage =
-  | 'setup'
-  | 'cleanup'
-  | 'service-invalidate'
-  | 'service-finalize'
+export type EffectFailureStage = 'setup' | 'cleanup' | 'service-invalidate' | 'service-finalize'
 
 export interface EffectFailureDiagnosticSnapshot {
   readonly sequence: number
@@ -56,10 +49,7 @@ export interface EffectDescriptor {
 
 const pendingDescriptors = new WeakMap<object, EffectDescriptor[]>()
 
-/**
- * 在一次同步 effect() 调用边界内传入 Core 私有描述；effect() 一进入便消费，
- * 因而组件 setup 中再创建的嵌套 Effect 不会误继承外层类型。
- */
+/** 描述在 effect() 入口同步消费，避免嵌套 Effect 继承外层类型。 */
 export function withEffectDescriptor<Result>(
   owner: object,
   descriptor: EffectDescriptor,
@@ -261,10 +251,7 @@ function snapshotFailure(
   })
 }
 
-/**
- * 子节点先于父节点返回；若父节点的错误完全由后代错误组成，它只是传播包装层，
- * 不再作为独立失败路径。兄弟节点之间不按 error identity 去重。
- */
+/** 子节点先返回；省略只包装后代错误的父节点，保留兄弟节点各自的失败路径。 */
 function collectSpecificFailures(
   nodes: readonly EffectNode[],
   parentPath: readonly string[] = [],
@@ -354,10 +341,7 @@ export class FiberDiagnostics {
     const siblings = parent ? parent.node.children : this.#roots
     siblings.push(node)
 
-    const path = Object.freeze([
-      ...parent?.path ?? [],
-      descriptor.label,
-    ])
+    const path = Object.freeze([...parent?.path ?? [], descriptor.label])
     const recordFailure = (stage: EffectFailureStage, error: unknown) => {
       if (!node.failures.some(failure => {
         return failure.stage === stage && Object.is(failure.error, error)
@@ -440,10 +424,7 @@ export class FiberDiagnostics {
   }
 
   failurePaths(handle: EffectDiagnosticHandle) {
-    const failures = collectSpecificFailures(
-      [handle.node],
-      handle.path.slice(0, -1),
-    ).sort((left, right) => {
+    const failures = collectSpecificFailures([handle.node], handle.path.slice(0, -1)).sort((left, right) => {
       return right.effectPath.length - left.effectPath.length
         || left.sequence - right.sequence
     })
